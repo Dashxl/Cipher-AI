@@ -8,6 +8,7 @@ import { kvSet } from "@/lib/cache/store";
 import type { AnalysisResult, AnalysisStatus } from "@/types/analysis";
 import { ThinkingLevel } from "@google/genai";
 import { env } from "@/lib/env";
+import { saveZip } from "@/lib/repo/zip-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -244,13 +245,23 @@ async function analyzeZipBuffer(
   zipBuf: Buffer,
   repoName: string
 ) {
+  // Persist ZIP for later file view & explain endpoints
+  await saveZip(id, zipBuf);
+
   const zip = await JSZip.loadAsync(zipBuf);
 
   const allActual = Object.keys(zip.files).filter((p) => !zip.files[p]?.dir);
-  const { normalizedPaths, normToActual } = buildNormalizedPathMap(allActual);
+  const { root, normalizedPaths, normToActual } = buildNormalizedPathMap(allActual);
 
   const textPaths = normalizedPaths.filter(isProbablyText);
   const keyFiles = pickKeyFiles(textPaths);
+
+  // Save metadata for file explorer
+  await kvSet(`repo:${id}`, {
+    repoName,
+    root,
+    files: textPaths.slice(0, 2000),
+  });
 
   // Token saving: small tree preview + small snippets
   const treePreview = textPaths.slice(0, 80).join("\n");
