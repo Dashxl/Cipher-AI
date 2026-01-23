@@ -13,7 +13,6 @@ import { MermaidView } from "@/components/app/mermaid-view";
 import Editor from "@monaco-editor/react";
 
 type RepoMeta = { repoName: string; root: string | null; files: string[] };
-
 type Tab = "overview" | "explore" | "vuln" | "debt";
 
 async function safeJson(res: Response): Promise<any> {
@@ -49,6 +48,9 @@ export default function AnalysisPage() {
   const [debtBusy, setDebtBusy] = useState(false);
   const [debtNote, setDebtNote] = useState<string>("");
   const [debt, setDebt] = useState<DebtIssue[]>([]);
+
+  // Patch state
+  const [patchBusyId, setPatchBusyId] = useState<string>("");
 
   // Poll analysis status
   useEffect(() => {
@@ -157,11 +159,59 @@ export default function AnalysisPage() {
   }
 
   function exportMd() {
-    window.open(`/api/analysis/export/${id}?format=md`, "_blank");
+    // Use location.href to avoid popup blockers
+    window.location.href = `/api/analysis/export/${id}?format=md`;
   }
 
   function exportPdf() {
-    window.open(`/api/analysis/export/${id}?format=pdf`, "_blank");
+    window.location.href = `/api/analysis/export/${id}?format=pdf`;
+  }
+
+  async function generatePatch(
+    file: string,
+    issueTitle: string,
+    issueDetails: string,
+    idForBusy: string
+  ) {
+    setPatchBusyId(idForBusy);
+    try {
+      const res = await fetch("/api/analysis/patch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ analysisId: id, file, issueTitle, issueDetails }),
+      });
+
+      const data = await safeJson(res);
+
+      if (!res.ok) {
+        alert(data.error ?? `Patch failed (${res.status})`);
+        return;
+      }
+
+      const diff = String(data.diff ?? "");
+      if (!diff.trim()) {
+        alert("Patch endpoint returned empty diff.");
+        return;
+      }
+
+      const blob = new Blob([diff], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `cipher-ai-${file.replace(/[\/\\]/g, "_")}.diff`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      if (data.note) {
+        // Optional: show note about truncation
+        console.warn(data.note);
+      }
+    } finally {
+      setPatchBusyId("");
+    }
   }
 
   if (!status) return <main className="p-6">Loading…</main>;
@@ -180,16 +230,28 @@ export default function AnalysisPage() {
           <Progress value={status.progress} />
 
           <div className="flex flex-wrap items-center gap-2 pt-2">
-            <Button variant={tab === "overview" ? "default" : "secondary"} onClick={() => setTab("overview")}>
+            <Button
+              variant={tab === "overview" ? "default" : "secondary"}
+              onClick={() => setTab("overview")}
+            >
               Overview
             </Button>
-            <Button variant={tab === "explore" ? "default" : "secondary"} onClick={() => setTab("explore")}>
+            <Button
+              variant={tab === "explore" ? "default" : "secondary"}
+              onClick={() => setTab("explore")}
+            >
               Explore
             </Button>
-            <Button variant={tab === "vuln" ? "default" : "secondary"} onClick={() => setTab("vuln")}>
+            <Button
+              variant={tab === "vuln" ? "default" : "secondary"}
+              onClick={() => setTab("vuln")}
+            >
               Vulnerabilities
             </Button>
-            <Button variant={tab === "debt" ? "default" : "secondary"} onClick={() => setTab("debt")}>
+            <Button
+              variant={tab === "debt" ? "default" : "secondary"}
+              onClick={() => setTab("debt")}
+            >
               Tech Debt
             </Button>
 
@@ -241,13 +303,24 @@ export default function AnalysisPage() {
             <div className="grid gap-4 md:grid-cols-[320px_1fr]">
               <div className="space-y-3">
                 <div className="text-sm text-muted-foreground">
-                  Repo: <span className="font-medium text-foreground">{repo?.repoName ?? "Loading…"}</span>
+                  Repo:{" "}
+                  <span className="font-medium text-foreground">
+                    {repo?.repoName ?? "Loading…"}
+                  </span>
                 </div>
 
-                <Input placeholder="Search files…" value={q} onChange={(e) => setQ(e.target.value)} />
+                <Input
+                  placeholder="Search files…"
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                />
 
                 <div className="h-[520px] overflow-auto rounded-md border">
-                  {!repo && <div className="p-3 text-sm text-muted-foreground">Loading file list…</div>}
+                  {!repo && (
+                    <div className="p-3 text-sm text-muted-foreground">
+                      Loading file list…
+                    </div>
+                  )}
 
                   {filtered.map((f) => (
                     <button
@@ -262,7 +335,9 @@ export default function AnalysisPage() {
                   ))}
 
                   {repo && filtered.length === 0 && (
-                    <div className="p-3 text-sm text-muted-foreground">No files match that search.</div>
+                    <div className="p-3 text-sm text-muted-foreground">
+                      No files match that search.
+                    </div>
                   )}
                 </div>
               </div>
@@ -274,10 +349,18 @@ export default function AnalysisPage() {
                   </div>
 
                   <div className="flex gap-2">
-                    <Button variant="secondary" disabled={!selected || busyExplain} onClick={() => runExplain("tech")}>
+                    <Button
+                      variant="secondary"
+                      disabled={!selected || busyExplain}
+                      onClick={() => runExplain("tech")}
+                    >
                       Explain
                     </Button>
-                    <Button variant="secondary" disabled={!selected || busyExplain} onClick={() => runExplain("eli5")}>
+                    <Button
+                      variant="secondary"
+                      disabled={!selected || busyExplain}
+                      onClick={() => runExplain("eli5")}
+                    >
                       ELI5
                     </Button>
                   </div>
@@ -298,7 +381,9 @@ export default function AnalysisPage() {
                 </div>
 
                 {explain && (
-                  <pre className="whitespace-pre-wrap text-sm p-4 rounded-md border bg-muted/20">{explain}</pre>
+                  <pre className="whitespace-pre-wrap text-sm p-4 rounded-md border bg-muted/20">
+                    {explain}
+                  </pre>
                 )}
               </div>
             </div>
@@ -313,24 +398,49 @@ export default function AnalysisPage() {
                 </Button>
               </div>
 
-              {vulnNote && <div className="text-sm text-muted-foreground border rounded-md p-3">{vulnNote}</div>}
+              {vulnNote && (
+                <div className="text-sm text-muted-foreground border rounded-md p-3">
+                  {vulnNote}
+                </div>
+              )}
 
               {vulns.length === 0 ? (
-                <div className="text-sm text-muted-foreground">No results yet. Click “Run scan”.</div>
+                <div className="text-sm text-muted-foreground">
+                  No results yet. Click “Run scan”.
+                </div>
               ) : (
                 <div className="space-y-3">
                   {vulns.map((v) => (
                     <div key={v.id} className="rounded-md border p-3 space-y-2">
                       <div className="flex items-center justify-between gap-2">
                         <div className="font-medium">{v.title}</div>
-                        <SeverityBadge s={v.severity} />
+
+                        <div className="flex items-center gap-2">
+                          <SeverityBadge s={v.severity} />
+                          <Button
+                            variant="secondary"
+                            disabled={patchBusyId === v.id}
+                            onClick={() =>
+                              generatePatch(
+                                v.file,
+                                v.title,
+                                `Severity: ${v.severity}\nType: ${v.type}\nRecommendation: ${v.recommendation}\nLocation: ${v.file}:${v.line}\n\nSnippet:\n${v.snippet}`,
+                                v.id
+                              )
+                            }
+                          >
+                            {patchBusyId === v.id ? "Generating…" : "Generate patch"}
+                          </Button>
+                        </div>
                       </div>
 
                       <div className="text-sm text-muted-foreground">
                         {v.file}:{v.line} • {v.type}
                       </div>
 
-                      <pre className="text-sm whitespace-pre-wrap bg-muted/20 rounded-md p-3">{v.snippet}</pre>
+                      <pre className="text-sm whitespace-pre-wrap bg-muted/20 rounded-md p-3">
+                        {v.snippet}
+                      </pre>
 
                       <div className="text-sm">
                         <span className="font-medium">Recommendation: </span>
@@ -342,7 +452,10 @@ export default function AnalysisPage() {
                           <span className="font-medium">Suggested fix: </span>
                           {v.fix}
                           {typeof v.confidence === "number" && (
-                            <span className="text-muted-foreground"> (confidence {v.confidence.toFixed(2)})</span>
+                            <span className="text-muted-foreground">
+                              {" "}
+                              (confidence {v.confidence.toFixed(2)})
+                            </span>
                           )}
                         </div>
                       )}
@@ -362,17 +475,40 @@ export default function AnalysisPage() {
                 </Button>
               </div>
 
-              {debtNote && <div className="text-sm text-muted-foreground border rounded-md p-3">{debtNote}</div>}
+              {debtNote && (
+                <div className="text-sm text-muted-foreground border rounded-md p-3">
+                  {debtNote}
+                </div>
+              )}
 
               {debt.length === 0 ? (
-                <div className="text-sm text-muted-foreground">No results yet. Click “Run scan”.</div>
+                <div className="text-sm text-muted-foreground">
+                  No results yet. Click “Run scan”.
+                </div>
               ) : (
                 <div className="space-y-3">
                   {debt.map((d) => (
                     <div key={d.id} className="rounded-md border p-3 space-y-2">
                       <div className="flex items-center justify-between gap-2">
                         <div className="font-medium">{d.title}</div>
-                        <SeverityBadge s={d.severity} />
+
+                        <div className="flex items-center gap-2">
+                          <SeverityBadge s={d.severity} />
+                          <Button
+                            variant="secondary"
+                            disabled={patchBusyId === d.id}
+                            onClick={() =>
+                              generatePatch(
+                                d.file,
+                                d.title,
+                                `Severity: ${d.severity}\nType: ${d.type}\nLocation: ${d.file}:${d.line}\n\nDetails: ${d.details}\nSuggestion: ${d.suggestion}`,
+                                d.id
+                              )
+                            }
+                          >
+                            {patchBusyId === d.id ? "Generating…" : "Generate patch"}
+                          </Button>
+                        </div>
                       </div>
 
                       <div className="text-sm text-muted-foreground">
@@ -394,7 +530,10 @@ export default function AnalysisPage() {
                           <span className="font-medium">Suggested refactor: </span>
                           {d.fix}
                           {typeof d.confidence === "number" && (
-                            <span className="text-muted-foreground"> (confidence {d.confidence.toFixed(2)})</span>
+                            <span className="text-muted-foreground">
+                              {" "}
+                              (confidence {d.confidence.toFixed(2)})
+                            </span>
                           )}
                         </div>
                       )}
@@ -411,7 +550,14 @@ export default function AnalysisPage() {
 }
 
 function SeverityBadge({ s }: { s: Severity }) {
-  const variant = s === "CRITICAL" ? "destructive" : s === "HIGH" ? "default" : s === "MEDIUM" ? "secondary" : "outline";
+  const variant =
+    s === "CRITICAL"
+      ? "destructive"
+      : s === "HIGH"
+      ? "default"
+      : s === "MEDIUM"
+      ? "secondary"
+      : "outline";
   return <Badge variant={variant as any}>{s}</Badge>;
 }
 
