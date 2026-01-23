@@ -14,12 +14,23 @@ import Editor from "@monaco-editor/react";
 
 type RepoMeta = { repoName: string; root: string | null; files: string[] };
 
+type Tab = "overview" | "explore" | "vuln" | "debt";
+
+async function safeJson(res: Response): Promise<any> {
+  const raw = await res.text();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { error: raw || `Request failed (${res.status})` };
+  }
+}
+
 export default function AnalysisPage() {
   const { id } = useParams<{ id: string }>();
 
   const [status, setStatus] = useState<AnalysisStatus | null>(null);
-
-  const [tab, setTab] = useState<"overview" | "explore" | "vuln" | "debt">("overview");
+  const [tab, setTab] = useState<Tab>("overview");
 
   // Explore state
   const [repo, setRepo] = useState<RepoMeta | null>(null);
@@ -29,12 +40,12 @@ export default function AnalysisPage() {
   const [explain, setExplain] = useState<string>("");
   const [busyExplain, setBusyExplain] = useState(false);
 
-  // Vuln state
+  // Vulnerability scan state
   const [vulnBusy, setVulnBusy] = useState(false);
   const [vulnNote, setVulnNote] = useState<string>("");
   const [vulns, setVulns] = useState<VulnFinding[]>([]);
 
-  // Debt state
+  // Tech debt scan state
   const [debtBusy, setDebtBusy] = useState(false);
   const [debtNote, setDebtNote] = useState<string>("");
   const [debt, setDebt] = useState<DebtIssue[]>([]);
@@ -58,7 +69,7 @@ export default function AnalysisPage() {
     };
   }, [id]);
 
-  // Load repo meta as soon as available (so Explore works even if Gemini global analysis fails)
+  // Load repo meta for Explore as soon as possible
   useEffect(() => {
     if (!status) return;
     if (repo) return;
@@ -87,14 +98,7 @@ export default function AnalysisPage() {
       cache: "no-store",
     });
 
-    const raw = await res.text();
-    let data: any = {};
-    try {
-      data = raw ? JSON.parse(raw) : {};
-    } catch {
-      data = { error: raw || `Request failed (${res.status})` };
-    }
-
+    const data = await safeJson(res);
     setCode(data.content ?? data.error ?? "");
   }
 
@@ -109,14 +113,7 @@ export default function AnalysisPage() {
         body: JSON.stringify({ analysisId: id, path: selected, mode }),
       });
 
-      const raw = await res.text();
-      let data: any = {};
-      try {
-        data = raw ? JSON.parse(raw) : {};
-      } catch {
-        data = { error: raw || `Request failed (${res.status})` };
-      }
-
+      const data = await safeJson(res);
       setExplain(data.text ?? data.error ?? `Request failed (${res.status})`);
     } finally {
       setBusyExplain(false);
@@ -133,14 +130,7 @@ export default function AnalysisPage() {
         body: JSON.stringify({ analysisId: id }),
       });
 
-      const raw = await res.text();
-      let data: any = {};
-      try {
-        data = raw ? JSON.parse(raw) : {};
-      } catch {
-        data = { error: raw || `Request failed (${res.status})` };
-      }
-
+      const data = await safeJson(res);
       setVulns(Array.isArray(data.findings) ? data.findings : []);
       setVulnNote(data.note ?? data.error ?? "");
     } finally {
@@ -158,19 +148,20 @@ export default function AnalysisPage() {
         body: JSON.stringify({ analysisId: id }),
       });
 
-      const raw = await res.text();
-      let data: any = {};
-      try {
-        data = raw ? JSON.parse(raw) : {};
-      } catch {
-        data = { error: raw || `Request failed (${res.status})` };
-      }
-
+      const data = await safeJson(res);
       setDebt(Array.isArray(data.issues) ? data.issues : []);
       setDebtNote(data.note ?? data.error ?? "");
     } finally {
       setDebtBusy(false);
     }
+  }
+
+  function exportMd() {
+    window.open(`/api/analysis/export/${id}?format=md`, "_blank");
+  }
+
+  function exportPdf() {
+    window.open(`/api/analysis/export/${id}?format=pdf`, "_blank");
   }
 
   if (!status) return <main className="p-6">Loading…</main>;
@@ -188,7 +179,7 @@ export default function AnalysisPage() {
 
           <Progress value={status.progress} />
 
-          <div className="flex flex-wrap gap-2 pt-2">
+          <div className="flex flex-wrap items-center gap-2 pt-2">
             <Button variant={tab === "overview" ? "default" : "secondary"} onClick={() => setTab("overview")}>
               Overview
             </Button>
@@ -201,6 +192,15 @@ export default function AnalysisPage() {
             <Button variant={tab === "debt" ? "default" : "secondary"} onClick={() => setTab("debt")}>
               Tech Debt
             </Button>
+
+            <div className="flex-1" />
+
+            <Button variant="secondary" onClick={exportMd}>
+              Export Markdown
+            </Button>
+            <Button variant="secondary" onClick={exportPdf}>
+              Export PDF
+            </Button>
           </div>
         </CardHeader>
 
@@ -211,21 +211,29 @@ export default function AnalysisPage() {
             </pre>
           )}
 
-          {tab === "overview" && status.result && (
+          {tab === "overview" && (
             <>
-              <div className="space-y-2">
-                <h2 className="text-lg font-semibold">Architecture Diagram</h2>
-                <MermaidView chart={status.result.mermaid} />
-              </div>
+              {status.result ? (
+                <>
+                  <div className="space-y-2">
+                    <h2 className="text-lg font-semibold">Architecture Diagram</h2>
+                    <MermaidView chart={status.result.mermaid} />
+                  </div>
 
-              <div className="space-y-2">
-                <h2 className="text-lg font-semibold">Summary</h2>
-                <ul className="list-disc pl-5 text-sm space-y-1">
-                  {status.result.summary.map((s, i) => (
-                    <li key={i}>{s}</li>
-                  ))}
-                </ul>
-              </div>
+                  <div className="space-y-2">
+                    <h2 className="text-lg font-semibold">Summary</h2>
+                    <ul className="list-disc pl-5 text-sm space-y-1">
+                      {status.result.summary.map((s, i) => (
+                        <li key={i}>{s}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Overview will appear once the global analysis completes.
+                </p>
+              )}
             </>
           )}
 
@@ -305,9 +313,7 @@ export default function AnalysisPage() {
                 </Button>
               </div>
 
-              {vulnNote && (
-                <div className="text-sm text-muted-foreground border rounded-md p-3">{vulnNote}</div>
-              )}
+              {vulnNote && <div className="text-sm text-muted-foreground border rounded-md p-3">{vulnNote}</div>}
 
               {vulns.length === 0 ? (
                 <div className="text-sm text-muted-foreground">No results yet. Click “Run scan”.</div>
@@ -319,14 +325,18 @@ export default function AnalysisPage() {
                         <div className="font-medium">{v.title}</div>
                         <SeverityBadge s={v.severity} />
                       </div>
+
                       <div className="text-sm text-muted-foreground">
                         {v.file}:{v.line} • {v.type}
                       </div>
+
                       <pre className="text-sm whitespace-pre-wrap bg-muted/20 rounded-md p-3">{v.snippet}</pre>
+
                       <div className="text-sm">
                         <span className="font-medium">Recommendation: </span>
                         {v.recommendation}
                       </div>
+
                       {v.fix && (
                         <div className="text-sm">
                           <span className="font-medium">Suggested fix: </span>
@@ -352,9 +362,7 @@ export default function AnalysisPage() {
                 </Button>
               </div>
 
-              {debtNote && (
-                <div className="text-sm text-muted-foreground border rounded-md p-3">{debtNote}</div>
-              )}
+              {debtNote && <div className="text-sm text-muted-foreground border rounded-md p-3">{debtNote}</div>}
 
               {debt.length === 0 ? (
                 <div className="text-sm text-muted-foreground">No results yet. Click “Run scan”.</div>
@@ -366,17 +374,21 @@ export default function AnalysisPage() {
                         <div className="font-medium">{d.title}</div>
                         <SeverityBadge s={d.severity} />
                       </div>
+
                       <div className="text-sm text-muted-foreground">
                         {d.file}:{d.line} • {d.type}
                       </div>
+
                       <div className="text-sm">
                         <span className="font-medium">Details: </span>
                         {d.details}
                       </div>
+
                       <div className="text-sm">
                         <span className="font-medium">Suggestion: </span>
                         {d.suggestion}
                       </div>
+
                       {d.fix && (
                         <div className="text-sm">
                           <span className="font-medium">Suggested refactor: </span>
@@ -399,8 +411,7 @@ export default function AnalysisPage() {
 }
 
 function SeverityBadge({ s }: { s: Severity }) {
-  const variant =
-    s === "CRITICAL" ? "destructive" : s === "HIGH" ? "default" : s === "MEDIUM" ? "secondary" : "outline";
+  const variant = s === "CRITICAL" ? "destructive" : s === "HIGH" ? "default" : s === "MEDIUM" ? "secondary" : "outline";
   return <Badge variant={variant as any}>{s}</Badge>;
 }
 
