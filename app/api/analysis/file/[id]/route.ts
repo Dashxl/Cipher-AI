@@ -3,14 +3,22 @@ import JSZip from "jszip";
 import { kvGet } from "@/lib/cache/store";
 import { loadZip } from "@/lib/repo/zip-store";
 
-type RepoMeta = { repoName: string; root: string | null; files: string[] };
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+type RepoMeta = {
+  repoName: string;
+  root: string | null;
+  files: string[];
+};
 
 function isSafePath(p: string) {
   return (
     p.length > 0 &&
-    p.length < 300 &&
+    p.length < 400 &&
     !p.includes("..") &&
     !p.startsWith("/") &&
+    !p.includes("\\") &&
     !p.includes("\0")
   );
 }
@@ -37,7 +45,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
 
   const content = await f.async("string");
 
-  // Cap para no matar el navegador
+  // Cap para no reventar el navegador
   const MAX = 200_000;
   const safe = content.length > MAX ? content.slice(0, MAX) + "\n\n/* truncated */" : content;
 

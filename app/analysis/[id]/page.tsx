@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import type { AnalysisStatus } from "@/types/analysis";
+import type { DebtIssue, VulnFinding, Severity } from "@/types/scan";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
@@ -15,16 +16,30 @@ type RepoMeta = { repoName: string; root: string | null; files: string[] };
 
 export default function AnalysisPage() {
   const { id } = useParams<{ id: string }>();
+
   const [status, setStatus] = useState<AnalysisStatus | null>(null);
 
+  const [tab, setTab] = useState<"overview" | "explore" | "vuln" | "debt">("overview");
+
+  // Explore state
   const [repo, setRepo] = useState<RepoMeta | null>(null);
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState<string>("");
   const [code, setCode] = useState<string>("");
   const [explain, setExplain] = useState<string>("");
-  const [tab, setTab] = useState<"overview" | "explore">("overview");
   const [busyExplain, setBusyExplain] = useState(false);
 
+  // Vuln state
+  const [vulnBusy, setVulnBusy] = useState(false);
+  const [vulnNote, setVulnNote] = useState<string>("");
+  const [vulns, setVulns] = useState<VulnFinding[]>([]);
+
+  // Debt state
+  const [debtBusy, setDebtBusy] = useState(false);
+  const [debtNote, setDebtNote] = useState<string>("");
+  const [debt, setDebt] = useState<DebtIssue[]>([]);
+
+  // Poll analysis status
   useEffect(() => {
     let alive = true;
 
@@ -43,9 +58,9 @@ export default function AnalysisPage() {
     };
   }, [id]);
 
-  // Load file list once analysis is done
+  // Load repo meta as soon as available (so Explore works even if Gemini global analysis fails)
   useEffect(() => {
-    if (!status || status.stage !== "done") return;
+    if (!status) return;
     if (repo) return;
 
     (async () => {
@@ -66,15 +81,26 @@ export default function AnalysisPage() {
   async function openFile(path: string) {
     setSelected(path);
     setExplain("");
+    setCode("Loading…");
+
     const res = await fetch(`/api/analysis/file/${id}?path=${encodeURIComponent(path)}`, {
       cache: "no-store",
     });
-    const data = (await res.json()) as { content?: string; error?: string };
+
+    const raw = await res.text();
+    let data: any = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      data = { error: raw || `Request failed (${res.status})` };
+    }
+
     setCode(data.content ?? data.error ?? "");
   }
 
   async function runExplain(mode: "tech" | "eli5") {
     if (!selected) return;
+
     setBusyExplain(true);
     try {
       const res = await fetch("/api/analysis/explain", {
@@ -82,10 +108,68 @@ export default function AnalysisPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ analysisId: id, path: selected, mode }),
       });
-      const data = (await res.json()) as { text?: string; error?: string };
-      setExplain(data.text ?? data.error ?? "");
+
+      const raw = await res.text();
+      let data: any = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = { error: raw || `Request failed (${res.status})` };
+      }
+
+      setExplain(data.text ?? data.error ?? `Request failed (${res.status})`);
     } finally {
       setBusyExplain(false);
+    }
+  }
+
+  async function runVulnScan() {
+    setVulnBusy(true);
+    setVulnNote("");
+    try {
+      const res = await fetch("/api/analysis/scan/vuln", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ analysisId: id }),
+      });
+
+      const raw = await res.text();
+      let data: any = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = { error: raw || `Request failed (${res.status})` };
+      }
+
+      setVulns(Array.isArray(data.findings) ? data.findings : []);
+      setVulnNote(data.note ?? data.error ?? "");
+    } finally {
+      setVulnBusy(false);
+    }
+  }
+
+  async function runDebtScan() {
+    setDebtBusy(true);
+    setDebtNote("");
+    try {
+      const res = await fetch("/api/analysis/scan/debt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ analysisId: id }),
+      });
+
+      const raw = await res.text();
+      let data: any = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = { error: raw || `Request failed (${res.status})` };
+      }
+
+      setDebt(Array.isArray(data.issues) ? data.issues : []);
+      setDebtNote(data.note ?? data.error ?? "");
+    } finally {
+      setDebtBusy(false);
     }
   }
 
@@ -96,18 +180,26 @@ export default function AnalysisPage() {
       <Card className="w-full max-w-6xl">
         <CardHeader className="space-y-2">
           <CardTitle>Analysis</CardTitle>
+
           <div className="flex items-center gap-2">
             <Badge variant="secondary">{status.stage}</Badge>
             <span className="text-sm text-muted-foreground">{status.message}</span>
           </div>
+
           <Progress value={status.progress} />
 
-          <div className="flex gap-2 pt-2">
+          <div className="flex flex-wrap gap-2 pt-2">
             <Button variant={tab === "overview" ? "default" : "secondary"} onClick={() => setTab("overview")}>
               Overview
             </Button>
             <Button variant={tab === "explore" ? "default" : "secondary"} onClick={() => setTab("explore")}>
               Explore
+            </Button>
+            <Button variant={tab === "vuln" ? "default" : "secondary"} onClick={() => setTab("vuln")}>
+              Vulnerabilities
+            </Button>
+            <Button variant={tab === "debt" ? "default" : "secondary"} onClick={() => setTab("debt")}>
+              Tech Debt
             </Button>
           </div>
         </CardHeader>
@@ -141,14 +233,14 @@ export default function AnalysisPage() {
             <div className="grid gap-4 md:grid-cols-[320px_1fr]">
               <div className="space-y-3">
                 <div className="text-sm text-muted-foreground">
-                  Repo: <span className="font-medium text-foreground">{repo?.repoName ?? "…"}</span>
+                  Repo: <span className="font-medium text-foreground">{repo?.repoName ?? "Loading…"}</span>
                 </div>
-                <Input
-                  placeholder="Search files…"
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                />
+
+                <Input placeholder="Search files…" value={q} onChange={(e) => setQ(e.target.value)} />
+
                 <div className="h-[520px] overflow-auto rounded-md border">
+                  {!repo && <div className="p-3 text-sm text-muted-foreground">Loading file list…</div>}
+
                   {filtered.map((f) => (
                     <button
                       key={f}
@@ -160,7 +252,10 @@ export default function AnalysisPage() {
                       {f}
                     </button>
                   ))}
-                  {!repo && <div className="p-3 text-sm text-muted-foreground">Loading file list…</div>}
+
+                  {repo && filtered.length === 0 && (
+                    <div className="p-3 text-sm text-muted-foreground">No files match that search.</div>
+                  )}
                 </div>
               </div>
 
@@ -169,6 +264,7 @@ export default function AnalysisPage() {
                   <div className="text-sm text-muted-foreground truncate">
                     {selected ? selected : "Select a file to view"}
                   </div>
+
                   <div className="flex gap-2">
                     <Button variant="secondary" disabled={!selected || busyExplain} onClick={() => runExplain("tech")}>
                       Explain
@@ -194,11 +290,106 @@ export default function AnalysisPage() {
                 </div>
 
                 {explain && (
-                  <pre className="whitespace-pre-wrap text-sm p-4 rounded-md border bg-muted/20">
-                    {explain}
-                  </pre>
+                  <pre className="whitespace-pre-wrap text-sm p-4 rounded-md border bg-muted/20">{explain}</pre>
                 )}
               </div>
+            </div>
+          )}
+
+          {tab === "vuln" && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-lg font-semibold">Vulnerabilities</h2>
+                <Button onClick={runVulnScan} disabled={vulnBusy}>
+                  {vulnBusy ? "Scanning…" : "Run scan"}
+                </Button>
+              </div>
+
+              {vulnNote && (
+                <div className="text-sm text-muted-foreground border rounded-md p-3">{vulnNote}</div>
+              )}
+
+              {vulns.length === 0 ? (
+                <div className="text-sm text-muted-foreground">No results yet. Click “Run scan”.</div>
+              ) : (
+                <div className="space-y-3">
+                  {vulns.map((v) => (
+                    <div key={v.id} className="rounded-md border p-3 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="font-medium">{v.title}</div>
+                        <SeverityBadge s={v.severity} />
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        {v.file}:{v.line} • {v.type}
+                      </div>
+                      <pre className="text-sm whitespace-pre-wrap bg-muted/20 rounded-md p-3">{v.snippet}</pre>
+                      <div className="text-sm">
+                        <span className="font-medium">Recommendation: </span>
+                        {v.recommendation}
+                      </div>
+                      {v.fix && (
+                        <div className="text-sm">
+                          <span className="font-medium">Suggested fix: </span>
+                          {v.fix}
+                          {typeof v.confidence === "number" && (
+                            <span className="text-muted-foreground"> (confidence {v.confidence.toFixed(2)})</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === "debt" && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-lg font-semibold">Tech Debt</h2>
+                <Button onClick={runDebtScan} disabled={debtBusy}>
+                  {debtBusy ? "Scanning…" : "Run scan"}
+                </Button>
+              </div>
+
+              {debtNote && (
+                <div className="text-sm text-muted-foreground border rounded-md p-3">{debtNote}</div>
+              )}
+
+              {debt.length === 0 ? (
+                <div className="text-sm text-muted-foreground">No results yet. Click “Run scan”.</div>
+              ) : (
+                <div className="space-y-3">
+                  {debt.map((d) => (
+                    <div key={d.id} className="rounded-md border p-3 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="font-medium">{d.title}</div>
+                        <SeverityBadge s={d.severity} />
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        {d.file}:{d.line} • {d.type}
+                      </div>
+                      <div className="text-sm">
+                        <span className="font-medium">Details: </span>
+                        {d.details}
+                      </div>
+                      <div className="text-sm">
+                        <span className="font-medium">Suggestion: </span>
+                        {d.suggestion}
+                      </div>
+                      {d.fix && (
+                        <div className="text-sm">
+                          <span className="font-medium">Suggested refactor: </span>
+                          {d.fix}
+                          {typeof d.confidence === "number" && (
+                            <span className="text-muted-foreground"> (confidence {d.confidence.toFixed(2)})</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </CardContent>
@@ -207,8 +398,14 @@ export default function AnalysisPage() {
   );
 }
 
+function SeverityBadge({ s }: { s: Severity }) {
+  const variant =
+    s === "CRITICAL" ? "destructive" : s === "HIGH" ? "default" : s === "MEDIUM" ? "secondary" : "outline";
+  return <Badge variant={variant as any}>{s}</Badge>;
+}
+
 function guessLanguage(path: string) {
-  const p = path.toLowerCase();
+  const p = (path || "").toLowerCase();
   if (p.endsWith(".ts") || p.endsWith(".tsx")) return "typescript";
   if (p.endsWith(".js") || p.endsWith(".jsx")) return "javascript";
   if (p.endsWith(".py")) return "python";
@@ -218,5 +415,7 @@ function guessLanguage(path: string) {
   if (p.endsWith(".md")) return "markdown";
   if (p.endsWith(".json")) return "json";
   if (p.endsWith(".yml") || p.endsWith(".yaml")) return "yaml";
+  if (p.endsWith(".css")) return "css";
+  if (p.endsWith(".html")) return "html";
   return "plaintext";
 }
