@@ -15,7 +15,6 @@ import Editor from "@monaco-editor/react";
 type RepoMeta = { repoName: string; root: string | null; files: string[] };
 type Tab = "overview" | "explore" | "vuln" | "debt";
 
-// Local type (keeps this file independent)
 type DepCveFinding = {
   id: string;
   ecosystem: "npm" | "PyPI" | string;
@@ -40,14 +39,22 @@ type DepsScanPayload = {
   truncated?: boolean;
 };
 
+type PatchView = "diff" | "updated" | "original";
+
 type PatchPreview = {
   open: boolean;
   file: string;
   line?: number;
   diff: string;
   note?: string;
+
+  // returned by /api/analysis/patch
   updated?: string;
   updatedTruncated?: boolean;
+
+  // fetched from /api/analysis/file/:id?path=
+  original?: string;
+  originalTruncated?: boolean;
 };
 
 type PreviewApplied = { file: string; content: string; truncated?: boolean };
@@ -60,6 +67,81 @@ async function safeJson(res: Response): Promise<any> {
   } catch {
     return { error: raw || `Request failed (${res.status})` };
   }
+}
+
+function computeDiffStats(diff: string) {
+  const lines = String(diff || "").replace(/\r/g, "").split("\n");
+  let added = 0;
+  let removed = 0;
+  for (const l of lines) {
+    if (!l) continue;
+    if (l.startsWith("+++ ") || l.startsWith("--- ")) continue;
+    if (l.startsWith("+")) added++;
+    else if (l.startsWith("-")) removed++;
+  }
+  return { added, removed };
+}
+
+function isDiffHeader(line: string) {
+  return (
+    line.startsWith("diff --git") ||
+    line.startsWith("index ") ||
+    line.startsWith("--- ") ||
+    line.startsWith("+++ ") ||
+    line.startsWith("@@") ||
+    line.startsWith("new file mode") ||
+    line.startsWith("deleted file mode")
+  );
+}
+
+function DiffBlock({ diff }: { diff: string }) {
+  const raw = String(diff || "").replace(/\r/g, "");
+  const lines = raw.split("\n");
+
+  // safety cap for very large diffs
+  const MAX_LINES = 12_000;
+  const slice = lines.length > MAX_LINES ? lines.slice(0, MAX_LINES) : lines;
+
+  return (
+    <pre className="text-xs leading-5 font-mono whitespace-pre overflow-auto max-h-[70vh] rounded-md border bg-muted/20 p-3">
+      <code>
+        {slice.map((line, i) => {
+          const isHeader = isDiffHeader(line);
+
+          // real additions/removals (ignore +++/---)
+          const isAdd = line.startsWith("+") && !line.startsWith("+++ ");
+          const isDel = line.startsWith("-") && !line.startsWith("--- ");
+          const isHunk = line.startsWith("@@");
+
+          const cls = isHeader
+            ? isHunk
+              ? "text-muted-foreground font-semibold"
+              : "text-muted-foreground"
+            : isAdd
+            ? "text-emerald-700 dark:text-emerald-300 bg-emerald-500/10"
+            : isDel
+            ? "text-red-700 dark:text-red-300 bg-red-500/10"
+            : "";
+
+          // Keep empty lines visible
+          const content = line.length ? line : " ";
+
+          return (
+            <span key={i} className={cls}>
+              {content}
+              {"\n"}
+            </span>
+          );
+        })}
+        {lines.length > MAX_LINES ? (
+          <span className="text-muted-foreground">
+            {"\n"}(Diff truncated to {MAX_LINES} lines for UI performance)
+            {"\n"}
+          </span>
+        ) : null}
+      </code>
+    </pre>
+  );
 }
 
 export default function AnalysisPage() {
@@ -85,7 +167,7 @@ export default function AnalysisPage() {
   const [vulns, setVulns] = useState<VulnFinding[]>([]);
   const [vulnRan, setVulnRan] = useState(false);
 
-  // Dependency CVEs (OSV)
+  // Dependency CVEs
   const [depsBusy, setDepsBusy] = useState(false);
   const [depsNote, setDepsNote] = useState<string>("");
   const [deps, setDeps] = useState<DepCveFinding[]>([]);
@@ -111,6 +193,7 @@ export default function AnalysisPage() {
   // Patch state
   const [patchBusyId, setPatchBusyId] = useState<string>("");
   const [patchPreview, setPatchPreview] = useState<PatchPreview | null>(null);
+  const [patchView, setPatchView] = useState<PatchView>("diff");
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
 
   // Monaco refs for jump-to-line + highlight
@@ -195,7 +278,7 @@ export default function AnalysisPage() {
     setSelected(path);
     setExplain("");
     setCode("Loading…");
-    setPreviewApplied(null); // opening file normally exits preview mode
+    setPreviewApplied(null);
 
     if (opts?.revealLine && Number.isFinite(opts.revealLine)) {
       setPendingReveal({ path, line: Math.max(1, Math.floor(opts.revealLine)) });
@@ -409,6 +492,33 @@ export default function AnalysisPage() {
     }
   }
 
+  async function fetchOriginalForModal(file: string) {
+    try {
+      const res = await fetch(`/api/analysis/file/${id}?path=${encodeURIComponent(file)}`, {
+        cache: "no-store",
+      });
+      const data = await safeJson(res);
+
+      const raw = String(data.content ?? "");
+      if (!raw) return;
+
+      const MAX_MODAL_CHARS = 250_000;
+      const truncated = raw.length > MAX_MODAL_CHARS;
+      const clipped = truncated ? raw.slice(0, MAX_MODAL_CHARS) : raw;
+
+      setPatchPreview((prev) => {
+        if (!prev || prev.file !== file) return prev;
+        return {
+          ...prev,
+          original: clipped,
+          originalTruncated: truncated,
+        };
+      });
+    } catch {
+      // best-effort
+    }
+  }
+
   async function generatePatch(
     file: string,
     line: number | undefined,
@@ -438,7 +548,9 @@ export default function AnalysisPage() {
       }
 
       setCopyState("idle");
-      setPatchPreview({
+      setPatchView("diff");
+
+      const pv: PatchPreview = {
         open: true,
         file,
         line,
@@ -446,7 +558,12 @@ export default function AnalysisPage() {
         note: data.note ? String(data.note) : undefined,
         updated: typeof data.updated === "string" ? data.updated : undefined,
         updatedTruncated: Boolean(data.updatedTruncated),
-      });
+      };
+
+      setPatchPreview(pv);
+
+      // load original for "Before" tab
+      fetchOriginalForModal(file);
     } finally {
       setPatchBusyId("");
     }
@@ -475,6 +592,29 @@ export default function AnalysisPage() {
     setPreviewApplied(null);
     await openFile(selected);
   }
+
+  const modalText =
+    patchPreview && patchPreview.open
+      ? patchView === "diff"
+        ? patchPreview.diff
+        : patchView === "updated"
+        ? patchPreview.updated ?? ""
+        : patchPreview.original ?? ""
+      : "";
+
+  const modalHint =
+    patchPreview && patchPreview.open
+      ? patchView === "updated" && patchPreview.updatedTruncated
+        ? "Updated file content is truncated (preview-only)."
+        : patchView === "original" && patchPreview.originalTruncated
+        ? "Original file content is truncated (preview-only)."
+        : patchView === "original" && !patchPreview.original
+        ? "Loading original file…"
+        : ""
+      : "";
+
+  const modalStats =
+    patchPreview && patchPreview.open ? computeDiffStats(patchPreview.diff) : null;
 
   if (!status) return <main className="p-6">Loading…</main>;
 
@@ -637,19 +777,12 @@ export default function AnalysisPage() {
                           showing patched content (not saved)
                         </span>
                         {previewApplied?.truncated ? (
-                          <span className="text-muted-foreground">
-                            {" "}
-                            • (preview truncated)
-                          </span>
+                          <span className="text-muted-foreground"> • (preview truncated)</span>
                         ) : null}
                       </div>
 
                       <div className="flex gap-2">
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => copyToClipboard(code)}
-                        >
+                        <Button size="sm" variant="secondary" onClick={() => copyToClipboard(code)}>
                           {copyState === "copied"
                             ? "Copied ✅"
                             : copyState === "error"
@@ -747,9 +880,7 @@ export default function AnalysisPage() {
                       No dependency CVE results yet. Click “Scan dependencies”.
                     </div>
                   ) : deps.length === 0 ? (
-                    <div className="text-sm text-muted-foreground">
-                      No dependency CVEs found ✅
-                    </div>
+                    <div className="text-sm text-muted-foreground">No dependency CVEs found ✅</div>
                   ) : (
                     <div className="space-y-2">
                       {deps.slice(0, 40).map((d) => (
@@ -757,9 +888,7 @@ export default function AnalysisPage() {
                           <div className="flex items-center justify-between gap-2">
                             <div className="font-medium">
                               {d.name}@{d.version}{" "}
-                              <span className="text-sm text-muted-foreground">
-                                ({d.ecosystem})
-                              </span>
+                              <span className="text-sm text-muted-foreground">({d.ecosystem})</span>
                             </div>
                             <SeverityBadge s={d.severity} />
                           </div>
@@ -769,8 +898,7 @@ export default function AnalysisPage() {
                             {d.fixedVersion ? (
                               <>
                                 {" "}
-                                • <span className="font-medium">Fixed:</span>{" "}
-                                {d.fixedVersion}
+                                • <span className="font-medium">Fixed:</span> {d.fixedVersion}
                               </>
                             ) : null}
                           </div>
@@ -788,21 +916,14 @@ export default function AnalysisPage() {
                   )}
                 </div>
 
-                {/* Heuristic vuln scan */}
                 {vulnNote && (
-                  <div className="text-sm text-muted-foreground border rounded-md p-3">
-                    {vulnNote}
-                  </div>
+                  <div className="text-sm text-muted-foreground border rounded-md p-3">{vulnNote}</div>
                 )}
 
                 {!vulnRan ? (
-                  <div className="text-sm text-muted-foreground">
-                    No results yet. Click “Run scan”.
-                  </div>
+                  <div className="text-sm text-muted-foreground">No results yet. Click “Run scan”.</div>
                 ) : vulns.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">
-                    No vulnerabilities found ✅
-                  </div>
+                  <div className="text-sm text-muted-foreground">No vulnerabilities found ✅</div>
                 ) : (
                   <div className="space-y-3">
                     {vulns.map((v) => (
@@ -863,19 +984,13 @@ export default function AnalysisPage() {
                 </div>
 
                 {debtNote && (
-                  <div className="text-sm text-muted-foreground border rounded-md p-3">
-                    {debtNote}
-                  </div>
+                  <div className="text-sm text-muted-foreground border rounded-md p-3">{debtNote}</div>
                 )}
 
                 {!debtRan ? (
-                  <div className="text-sm text-muted-foreground">
-                    No results yet. Click “Run scan”.
-                  </div>
+                  <div className="text-sm text-muted-foreground">No results yet. Click “Run scan”.</div>
                 ) : debt.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">
-                    No tech debt issues found ✅
-                  </div>
+                  <div className="text-sm text-muted-foreground">No tech debt issues found ✅</div>
                 ) : (
                   <div className="space-y-3">
                     {debt.map((d) => (
@@ -932,7 +1047,11 @@ export default function AnalysisPage() {
 
       {/* Patch Preview Modal */}
       {patchPreview?.open ? (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" aria-modal="true" role="dialog">
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+          aria-modal="true"
+          role="dialog"
+        >
           <button
             className="absolute inset-0 bg-black/50"
             aria-label="Close patch preview"
@@ -940,55 +1059,107 @@ export default function AnalysisPage() {
           />
 
           <div className="relative w-full max-w-5xl rounded-xl border bg-background shadow-lg">
-            <div className="p-4 border-b flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="font-semibold truncate">
-                  Patch preview — <span className="text-muted-foreground">{patchPreview.file}</span>
+            <div className="p-4 border-b space-y-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="font-semibold truncate">
+                    Patch preview —{" "}
+                    <span className="text-muted-foreground">{patchPreview.file}</span>
+                    {modalStats ? (
+                      <span className="ml-2 text-xs text-muted-foreground">
+                        (+{modalStats.added} / -{modalStats.removed})
+                      </span>
+                    ) : null}
+                  </div>
+                  {patchPreview.note ? (
+                    <div className="text-sm text-muted-foreground mt-1">{patchPreview.note}</div>
+                  ) : null}
                 </div>
-                {patchPreview.note ? (
-                  <div className="text-sm text-muted-foreground mt-1">{patchPreview.note}</div>
-                ) : null}
+
+                <div className="flex items-center gap-2">
+                  <Button variant="secondary" onClick={() => copyToClipboard(modalText)}>
+                    {copyState === "copied"
+                      ? "Copied ✅"
+                      : copyState === "error"
+                      ? "Copy failed"
+                      : "Copy"}
+                  </Button>
+
+                  <Button
+                    variant="secondary"
+                    onClick={() => downloadDiff(patchPreview.file, patchPreview.diff)}
+                  >
+                    Download diff
+                  </Button>
+
+                  <Button
+                    variant="secondary"
+                    disabled={!patchPreview.updated}
+                    onClick={() => applyPreviewFromPatch(patchPreview)}
+                    title={!patchPreview.updated ? "Patch endpoint did not return updated content" : ""}
+                  >
+                    Open patched
+                  </Button>
+
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      const f = patchPreview.file;
+                      const ln = patchPreview.line;
+                      setPatchPreview(null);
+                      if (typeof ln === "number" && Number.isFinite(ln)) jumpToFileLine(f, ln);
+                      else (setTab("explore"), openFile(f));
+                    }}
+                  >
+                    Open file
+                  </Button>
+
+                  <Button onClick={() => setPatchPreview(null)}>Close</Button>
+                </div>
               </div>
 
-              <div className="flex items-center gap-2">
-                <Button variant="secondary" onClick={() => copyToClipboard(patchPreview.diff)}>
-                  {copyState === "copied" ? "Copied ✅" : copyState === "error" ? "Copy failed" : "Copy diff"}
-                </Button>
-
-                <Button variant="secondary" onClick={() => downloadDiff(patchPreview.file, patchPreview.diff)}>
-                  Download diff
+              {/* Tabs */}
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant={patchView === "diff" ? "default" : "secondary"}
+                  onClick={() => setPatchView("diff")}
+                >
+                  Diff
                 </Button>
 
                 <Button
-                  variant="secondary"
+                  size="sm"
+                  variant={patchView === "updated" ? "default" : "secondary"}
                   disabled={!patchPreview.updated}
-                  onClick={() => applyPreviewFromPatch(patchPreview)}
-                  title={!patchPreview.updated ? "Patch endpoint did not return updated content" : ""}
+                  onClick={() => setPatchView("updated")}
+                  title={!patchPreview.updated ? "No updated file returned" : ""}
                 >
-                  Preview applied
+                  Updated file
                 </Button>
 
                 <Button
-                  variant="secondary"
-                  onClick={() => {
-                    const f = patchPreview.file;
-                    const ln = patchPreview.line;
-                    setPatchPreview(null);
-                    if (typeof ln === "number" && Number.isFinite(ln)) jumpToFileLine(f, ln);
-                    else (setTab("explore"), openFile(f));
-                  }}
+                  size="sm"
+                  variant={patchView === "original" ? "default" : "secondary"}
+                  onClick={() => setPatchView("original")}
                 >
-                  Open file
+                  Original file
                 </Button>
 
-                <Button onClick={() => setPatchPreview(null)}>Close</Button>
+                <div className="flex-1" />
+
+                {modalHint ? <div className="text-xs text-muted-foreground">{modalHint}</div> : null}
               </div>
             </div>
 
             <div className="p-4">
-              <pre className="text-xs leading-5 font-mono whitespace-pre overflow-auto max-h-[70vh] rounded-md border bg-muted/20 p-3">
-                {patchPreview.diff}
-              </pre>
+              {patchView === "diff" ? (
+                <DiffBlock diff={patchPreview.diff} />
+              ) : (
+                <pre className="text-xs leading-5 font-mono whitespace-pre overflow-auto max-h-[70vh] rounded-md border bg-muted/20 p-3">
+                  {modalText || (patchView === "original" ? "Loading…" : "")}
+                </pre>
+              )}
             </div>
           </div>
         </div>
