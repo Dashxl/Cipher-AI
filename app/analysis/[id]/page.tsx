@@ -15,7 +15,7 @@ import Editor from "@monaco-editor/react";
 type RepoMeta = { repoName: string; root: string | null; files: string[] };
 type Tab = "overview" | "explore" | "vuln" | "debt";
 
-// Local type to avoid depending on scan.ts having DepCveFinding exported
+// Local type (keeps this file independent)
 type DepCveFinding = {
   id: string;
   ecosystem: "npm" | "PyPI" | string;
@@ -46,7 +46,11 @@ type PatchPreview = {
   line?: number;
   diff: string;
   note?: string;
+  updated?: string;
+  updatedTruncated?: boolean;
 };
+
+type PreviewApplied = { file: string; content: string; truncated?: boolean };
 
 async function safeJson(res: Response): Promise<any> {
   const raw = await res.text();
@@ -72,7 +76,10 @@ export default function AnalysisPage() {
   const [explain, setExplain] = useState<string>("");
   const [busyExplain, setBusyExplain] = useState(false);
 
-  // Vulnerability scan state (heuristic)
+  // Preview-applied state (Monaco shows patched content, not saved)
+  const [previewApplied, setPreviewApplied] = useState<PreviewApplied | null>(null);
+
+  // Vulnerability scan state
   const [vulnBusy, setVulnBusy] = useState(false);
   const [vulnNote, setVulnNote] = useState<string>("");
   const [vulns, setVulns] = useState<VulnFinding[]>([]);
@@ -106,12 +113,14 @@ export default function AnalysisPage() {
   const [patchPreview, setPatchPreview] = useState<PatchPreview | null>(null);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
 
-  // Monaco refs for jump-to-line
+  // Monaco refs for jump-to-line + highlight
   const editorRef = useRef<any>(null);
   const decoIdsRef = useRef<string[]>([]);
   const [pendingReveal, setPendingReveal] = useState<{ path: string; line: number } | null>(null);
 
-  // Inject CSS for Monaco decorations (line highlight)
+  const isPreviewFile = Boolean(previewApplied && selected && previewApplied.file === selected);
+
+  // Inject CSS for Monaco decorations
   useEffect(() => {
     const styleId = "cipher-monaco-highlight-style";
     if (document.getElementById(styleId)) return;
@@ -162,7 +171,7 @@ export default function AnalysisPage() {
     };
   }, [id]);
 
-  // Load repo meta for Explore as soon as possible
+  // Load repo meta for Explore
   useEffect(() => {
     if (!status) return;
     if (repo) return;
@@ -186,6 +195,7 @@ export default function AnalysisPage() {
     setSelected(path);
     setExplain("");
     setCode("Loading…");
+    setPreviewApplied(null); // opening file normally exits preview mode
 
     if (opts?.revealLine && Number.isFinite(opts.revealLine)) {
       setPendingReveal({ path, line: Math.max(1, Math.floor(opts.revealLine)) });
@@ -206,7 +216,7 @@ export default function AnalysisPage() {
     await openFile(path, { revealLine: line });
   }
 
-  // Perform reveal + decoration once Monaco has code loaded
+  // Reveal + decorate once Monaco has code loaded
   useEffect(() => {
     const p = pendingReveal;
     const editor = editorRef.current;
@@ -221,7 +231,6 @@ export default function AnalysisPage() {
       const maxLine = model.getLineCount?.() ?? 1;
       const targetLine = Math.min(Math.max(1, p.line), maxLine);
 
-      // Clear old decorations
       decoIdsRef.current = editor.deltaDecorations(decoIdsRef.current, []);
 
       const monaco = (window as any).monaco;
@@ -230,7 +239,6 @@ export default function AnalysisPage() {
         return;
       }
 
-      // Add highlight decoration to the target line
       const newDecos = [
         {
           range: new monaco.Range(targetLine, 1, targetLine, 1),
@@ -384,7 +392,6 @@ export default function AnalysisPage() {
         return;
       }
 
-      // Fallback
       const ta = document.createElement("textarea");
       ta.value = text;
       ta.style.position = "fixed";
@@ -437,10 +444,36 @@ export default function AnalysisPage() {
         line,
         diff,
         note: data.note ? String(data.note) : undefined,
+        updated: typeof data.updated === "string" ? data.updated : undefined,
+        updatedTruncated: Boolean(data.updatedTruncated),
       });
     } finally {
       setPatchBusyId("");
     }
+  }
+
+  function applyPreviewFromPatch(p: PatchPreview) {
+    if (!p.updated) return;
+
+    setTab("explore");
+    setSelected(p.file);
+    setExplain("");
+    setPreviewApplied({ file: p.file, content: p.updated, truncated: p.updatedTruncated });
+    setCode(p.updated);
+
+    if (typeof p.line === "number" && Number.isFinite(p.line)) {
+      setPendingReveal({ path: p.file, line: Math.max(1, Math.floor(p.line)) });
+    } else {
+      setPendingReveal(null);
+    }
+
+    setPatchPreview(null);
+  }
+
+  async function revertPreview() {
+    if (!selected) return;
+    setPreviewApplied(null);
+    await openFile(selected);
   }
 
   if (!status) return <main className="p-6">Loading…</main>;
@@ -596,6 +629,40 @@ export default function AnalysisPage() {
                     </div>
                   </div>
 
+                  {isPreviewFile ? (
+                    <div className="rounded-md border bg-muted/10 p-3 flex items-center justify-between gap-3">
+                      <div className="text-sm">
+                        <span className="font-medium">Preview mode:</span>{" "}
+                        <span className="text-muted-foreground">
+                          showing patched content (not saved)
+                        </span>
+                        {previewApplied?.truncated ? (
+                          <span className="text-muted-foreground">
+                            {" "}
+                            • (preview truncated)
+                          </span>
+                        ) : null}
+                      </div>
+
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => copyToClipboard(code)}
+                        >
+                          {copyState === "copied"
+                            ? "Copied ✅"
+                            : copyState === "error"
+                            ? "Copy failed"
+                            : "Copy content"}
+                        </Button>
+                        <Button size="sm" variant="secondary" onClick={revertPreview}>
+                          Revert
+                        </Button>
+                      </div>
+                    </div>
+                  ) : null}
+
                   <div className="rounded-md border overflow-hidden">
                     <Editor
                       height="420px"
@@ -632,7 +699,7 @@ export default function AnalysisPage() {
                   </Button>
                 </div>
 
-                {/* Dependency CVEs (OSV) */}
+                {/* Dependency CVEs */}
                 <div className="rounded-md border p-4 space-y-3">
                   <div className="flex items-start justify-between gap-3">
                     <div>
@@ -681,7 +748,7 @@ export default function AnalysisPage() {
                     </div>
                   ) : deps.length === 0 ? (
                     <div className="text-sm text-muted-foreground">
-                      No dependency CVEs found ✅ (good news).
+                      No dependency CVEs found ✅
                     </div>
                   ) : (
                     <div className="space-y-2">
@@ -709,18 +776,6 @@ export default function AnalysisPage() {
                           </div>
 
                           <div className="text-sm mt-2">{d.summary}</div>
-
-                          {d.references?.length ? (
-                            <div className="text-sm text-muted-foreground mt-2">
-                              Refs:{" "}
-                              {d.references.slice(0, 4).map((r, i) => (
-                                <span key={r}>
-                                  {i ? " • " : ""}
-                                  {r}
-                                </span>
-                              ))}
-                            </div>
-                          ) : null}
                         </div>
                       ))}
 
@@ -746,7 +801,7 @@ export default function AnalysisPage() {
                   </div>
                 ) : vulns.length === 0 ? (
                   <div className="text-sm text-muted-foreground">
-                    No vulnerabilities found ✅ (good news).
+                    No vulnerabilities found ✅
                   </div>
                 ) : (
                   <div className="space-y-3">
@@ -791,19 +846,6 @@ export default function AnalysisPage() {
                           <span className="font-medium">Recommendation: </span>
                           {v.recommendation}
                         </div>
-
-                        {v.fix && (
-                          <div className="text-sm">
-                            <span className="font-medium">Suggested fix: </span>
-                            {v.fix}
-                            {typeof v.confidence === "number" && (
-                              <span className="text-muted-foreground">
-                                {" "}
-                                (confidence {v.confidence.toFixed(2)})
-                              </span>
-                            )}
-                          </div>
-                        )}
                       </div>
                     ))}
                   </div>
@@ -832,7 +874,7 @@ export default function AnalysisPage() {
                   </div>
                 ) : debt.length === 0 ? (
                   <div className="text-sm text-muted-foreground">
-                    No tech debt issues found ✅ (good news).
+                    No tech debt issues found ✅
                   </div>
                 ) : (
                   <div className="space-y-3">
@@ -878,19 +920,6 @@ export default function AnalysisPage() {
                           <span className="font-medium">Suggestion: </span>
                           {d.suggestion}
                         </div>
-
-                        {d.fix && (
-                          <div className="text-sm">
-                            <span className="font-medium">Suggested refactor: </span>
-                            {d.fix}
-                            {typeof d.confidence === "number" && (
-                              <span className="text-muted-foreground">
-                                {" "}
-                                (confidence {d.confidence.toFixed(2)})
-                              </span>
-                            )}
-                          </div>
-                        )}
                       </div>
                     ))}
                   </div>
@@ -903,11 +932,7 @@ export default function AnalysisPage() {
 
       {/* Patch Preview Modal */}
       {patchPreview?.open ? (
-        <div
-          className="fixed inset-0 z-[60] flex items-center justify-center p-4"
-          aria-modal="true"
-          role="dialog"
-        >
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" aria-modal="true" role="dialog">
           <button
             className="absolute inset-0 bg-black/50"
             aria-label="Close patch preview"
@@ -921,29 +946,26 @@ export default function AnalysisPage() {
                   Patch preview — <span className="text-muted-foreground">{patchPreview.file}</span>
                 </div>
                 {patchPreview.note ? (
-                  <div className="text-sm text-muted-foreground mt-1">
-                    {patchPreview.note}
-                  </div>
+                  <div className="text-sm text-muted-foreground mt-1">{patchPreview.note}</div>
                 ) : null}
               </div>
 
               <div className="flex items-center gap-2">
-                <Button
-                  variant="secondary"
-                  onClick={() => copyToClipboard(patchPreview.diff)}
-                >
-                  {copyState === "copied"
-                    ? "Copied ✅"
-                    : copyState === "error"
-                    ? "Copy failed"
-                    : "Copy diff"}
+                <Button variant="secondary" onClick={() => copyToClipboard(patchPreview.diff)}>
+                  {copyState === "copied" ? "Copied ✅" : copyState === "error" ? "Copy failed" : "Copy diff"}
+                </Button>
+
+                <Button variant="secondary" onClick={() => downloadDiff(patchPreview.file, patchPreview.diff)}>
+                  Download diff
                 </Button>
 
                 <Button
                   variant="secondary"
-                  onClick={() => downloadDiff(patchPreview.file, patchPreview.diff)}
+                  disabled={!patchPreview.updated}
+                  onClick={() => applyPreviewFromPatch(patchPreview)}
+                  title={!patchPreview.updated ? "Patch endpoint did not return updated content" : ""}
                 >
-                  Download diff
+                  Preview applied
                 </Button>
 
                 <Button
@@ -953,7 +975,7 @@ export default function AnalysisPage() {
                     const ln = patchPreview.line;
                     setPatchPreview(null);
                     if (typeof ln === "number" && Number.isFinite(ln)) jumpToFileLine(f, ln);
-                    else setTab("explore"), openFile(f);
+                    else (setTab("explore"), openFile(f));
                   }}
                 >
                   Open file

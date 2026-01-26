@@ -6,6 +6,7 @@ import { loadZip } from "@/lib/repo/zip-store";
 import { genai } from "@/lib/genai/client";
 import { MODELS } from "@/lib/genai/models";
 import { ThinkingLevel } from "@google/genai";
+import { createTwoFilesPatch } from "diff";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,10 +45,9 @@ function isQuota(msg: string) {
 }
 
 /**
- * Minimal unified diff generator for demo.
- * It outputs a full-file replacement diff (works great for hackathon demo).
+ * Fallback unified diff generator (full-file replacement).
  */
-function unifiedDiff(path: string, oldText: string, newText: string) {
+function fullReplacementDiff(path: string, oldText: string, newText: string) {
   const oldLines = oldText.replace(/\r/g, "").split("\n");
   const newLines = newText.replace(/\r/g, "").split("\n");
 
@@ -63,7 +63,27 @@ function unifiedDiff(path: string, oldText: string, newText: string) {
   for (const l of oldLines) body.push(`-${l}`);
   for (const l of newLines) body.push(`+${l}`);
 
-  return [...header, ...body].join("\n");
+  return [...header, ...body].join("\n") + "\n";
+}
+
+/**
+ * Line-level git-style unified diff using `diff` package.
+ */
+function lineLevelGitDiff(path: string, oldText: string, newText: string) {
+  const a = (oldText ?? "").replace(/\r\n/g, "\n");
+  const b = (newText ?? "").replace(/\r\n/g, "\n");
+
+  let patch = createTwoFilesPatch(`a/${path}`, `b/${path}`, a, b, "", "", { context: 3 });
+
+  patch = patch.replace(/^Index:.*\n/gm, "");
+  patch = patch.replace(/^=+\n/gm, "");
+
+  patch = `diff --git a/${path} b/${path}\n` + patch;
+
+  patch = patch.replace(/\r\n/g, "\n");
+  if (!patch.endsWith("\n")) patch += "\n";
+
+  return patch;
 }
 
 export async function POST(req: Request) {
@@ -86,7 +106,6 @@ export async function POST(req: Request) {
 
     const original = await f.async("string");
 
-    // Keep token usage down
     const MAX_CHARS = 18_000;
     const clipped = original.slice(0, MAX_CHARS);
     const truncatedNote =
@@ -113,7 +132,7 @@ export async function POST(req: Request) {
       .join("\n");
 
     const res = await genai.models.generateContent({
-      model: MODELS.fast, // Gemini 3 Flash
+      model: MODELS.fast,
       contents: prompt,
       config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
     });
@@ -123,23 +142,51 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Gemini returned empty patch." }, { status: 500 });
     }
 
-    const diff = unifiedDiff(body.file, original, updated);
+    const normOld = original.replace(/\r\n/g, "\n").trimEnd();
+    const normNew = updated.replace(/\r\n/g, "\n").trimEnd();
+    if (normOld === normNew) {
+      return NextResponse.json(
+        { error: "Gemini returned no changes for this issue. Try re-running or adjust issue context." },
+        { status: 422 }
+      );
+    }
 
-    // Avoid returning extremely large payloads
-    const MAX_RETURN_CHARS = 280_000;
-    const updatedContent =
-      updated.length > MAX_RETURN_CHARS ? updated.slice(0, MAX_RETURN_CHARS) : updated;
+    let diff = "";
+    let note: string | undefined;
 
-    const noteParts: string[] = [];
-    if (original.length > MAX_CHARS) noteParts.push("Patch generated from truncated input; review carefully.");
-    if (updated.length > MAX_RETURN_CHARS) noteParts.push("Updated content was truncated in response payload (preview only).");
-    const note = noteParts.length ? noteParts.join(" ") : undefined;
+    try {
+      diff = lineLevelGitDiff(body.file, original, updated);
+
+      const MAX_DIFF_CHARS = 2_000_000;
+      if (diff.length > MAX_DIFF_CHARS) {
+        diff = fullReplacementDiff(body.file, original, updated);
+        note = "Line-level diff was too large; returned full-file replacement diff instead.";
+      }
+    } catch (e) {
+      diff = fullReplacementDiff(body.file, original, updated);
+      note = `Line-level diff failed; returned full-file replacement diff. (${toMsg(e)})`;
+    }
+
+    const truncWarn =
+      original.length > MAX_CHARS ? "Patch generated from truncated input; review carefully." : undefined;
+
+    // For UI preview: return updated content too (cap to avoid huge responses)
+    const MAX_RETURN_UPDATED = 250_000;
+    const updatedTruncated = updated.length > MAX_RETURN_UPDATED;
+    const updatedForClient = updatedTruncated ? updated.slice(0, MAX_RETURN_UPDATED) : updated;
+
+    const combinedNote =
+      note ??
+      (updatedTruncated
+        ? "Updated file content was truncated for preview (UI only)."
+        : truncWarn);
 
     return NextResponse.json({
       file: body.file,
       diff,
-      updatedContent, // ✅ NEW (Option A)
-      note,
+      updated: updatedForClient,
+      updatedTruncated,
+      note: combinedNote,
     });
   } catch (err) {
     const msg = toMsg(err);
