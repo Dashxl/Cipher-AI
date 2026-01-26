@@ -122,4 +122,23 @@
   body {
     @apply bg-background text-foreground;
   }
+  /* Cipher AI: Monaco line highlight for jump-to-line */
+.cipher-line-highlight {
+  background: rgba(255, 214, 10, 0.18);
+}
+
+.cipher-line-glyph {
+  background: rgba(255, 214, 10, 0.9);
+  border-radius: 9999px;
+}
+
+/* Cipher AI: highlight when jumping to a finding line */
+.cipher-highlight-line {
+  background: rgba(250, 204, 21, 0.18); /* amarillo suave */
+}
+.dark .cipher-highlight-line {
+  background: rgba(250, 204, 21, 0.14);
+}
+
+
 }

@@ -86,7 +86,7 @@ export async function POST(req: Request) {
 
     const original = await f.async("string");
 
-    // Keep token usage down: send first N chars + also provide note to keep functionality.
+    // Keep token usage down
     const MAX_CHARS = 18_000;
     const clipped = original.slice(0, MAX_CHARS);
     const truncatedNote =
@@ -125,10 +125,21 @@ export async function POST(req: Request) {
 
     const diff = unifiedDiff(body.file, original, updated);
 
+    // Avoid returning extremely large payloads
+    const MAX_RETURN_CHARS = 280_000;
+    const updatedContent =
+      updated.length > MAX_RETURN_CHARS ? updated.slice(0, MAX_RETURN_CHARS) : updated;
+
+    const noteParts: string[] = [];
+    if (original.length > MAX_CHARS) noteParts.push("Patch generated from truncated input; review carefully.");
+    if (updated.length > MAX_RETURN_CHARS) noteParts.push("Updated content was truncated in response payload (preview only).");
+    const note = noteParts.length ? noteParts.join(" ") : undefined;
+
     return NextResponse.json({
       file: body.file,
       diff,
-      note: original.length > MAX_CHARS ? "Patch generated from truncated input; review carefully." : undefined,
+      updatedContent, // ✅ NEW (Option A)
+      note,
     });
   } catch (err) {
     const msg = toMsg(err);

@@ -25,3 +25,17 @@ export type DebtIssue = {
   fix?: string;        // Gemini suggested refactor (optional)
   confidence?: number; // 0..1 (optional)
 };
+
+export type DepCveFinding = {
+  id: string; // e.g. "npm:react@18.2.0:GHSA-xxxx"
+  ecosystem: "npm" | "PyPI";
+  name: string;
+  version: string;
+  vulnId: string;
+  severity: Severity;
+  summary: string;
+  details?: string;
+  fixedVersion?: string;
+  references?: string[];
+};
+
