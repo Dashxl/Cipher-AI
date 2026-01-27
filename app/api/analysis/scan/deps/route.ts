@@ -1,383 +1,416 @@
-import { NextResponse } from "next/server";
-import { z } from "zod";
 import JSZip from "jszip";
+import type { DepCveFinding, Severity } from "@/types/scan";
 import { kvGet, kvSet } from "@/lib/cache/store";
 import { loadZip } from "@/lib/repo/zip-store";
-import type { DepCveFinding, Severity } from "@/types/scan";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
 
-type RepoMeta = { repoName: string; root: string | null; files: string[] };
+type Dep = { ecosystem: "npm" | "PyPI"; name: string; version: string; source: string };
 
-const BodySchema = z.object({
-  analysisId: z.string().min(1),
-  maxDeps: z.number().int().min(20).max(400).default(200),
-  maxVulns: z.number().int().min(20).max(400).default(200), // cap unique vuln fetches
-});
+const DEFAULT_MAX_DEPS = 450;
+const CACHE_TTL_SECONDS = 60 * 30; // 30 min (ajústalo si quieres)
 
-function toMsg(err: unknown) {
-  return err instanceof Error ? err.message : String(err);
-}
-
-function isQuota(msg: string) {
-  const m = (msg || "").toLowerCase();
-  return m.includes("429") || m.includes("rate") || m.includes("quota") || m.includes("too many requests");
-}
-
-function sevRank(s: Severity) {
-  return s === "CRITICAL" ? 0 : s === "HIGH" ? 1 : s === "MEDIUM" ? 2 : 3;
-}
-
-function bestMatchPath(files: string[], fileNameLower: string) {
-  const candidates = (files ?? []).filter((p) => {
-    const pl = p.toLowerCase();
-    return pl.endsWith(`/${fileNameLower}`) || pl === fileNameLower;
-  });
-  if (!candidates.length) return null;
-  // prefer shortest path (root-level first)
-  candidates.sort((a, b) => a.length - b.length);
-  return candidates[0];
-}
-
-function parsePackageLock(raw: string): Array<{ name: string; version: string }> {
+export async function POST(req: Request) {
   try {
-    const obj = JSON.parse(raw);
-    const out = new Map<string, string>();
+    const body = await req.json().catch(() => ({}));
+    const analysisId = String(body?.analysisId ?? "");
+    const maxDeps = clampInt(body?.maxDeps ?? DEFAULT_MAX_DEPS, 50, 1500);
 
-    // npm lock v2/v3: { packages: { "node_modules/<name>": { version } } }
-    if (obj && typeof obj === "object" && obj.packages && typeof obj.packages === "object") {
-      for (const [k, v] of Object.entries<any>(obj.packages)) {
-        if (!k || k === "") continue;
-        const kk = String(k);
-        if (!kk.includes("node_modules/")) continue;
+    if (!analysisId) return Response.json({ error: "Missing analysisId" }, { status: 400 });
 
-        const name = kk.split("node_modules/").pop() || "";
-        const ver = v?.version ? String(v.version) : "";
-        if (name && ver && !out.has(name)) out.set(name, ver);
+    const cacheKey = `scan:deps:${analysisId}:${maxDeps}`;
+    const cached = await kvGet<any>(cacheKey);
+    if (cached) return Response.json(cached);
+
+    const zipBytes = await loadZip(analysisId);
+    if (!zipBytes) {
+      return Response.json({ error: "Missing ZIP for analysisId. Re-run analysis/start." }, { status: 400 });
+    }
+
+    const zip = await JSZip.loadAsync(zipBytes as any);
+    const fileNames = Object.keys(zip.files).filter((n) => !zip.files[n].dir);
+
+    const manifests = pickManifests(fileNames);
+
+    if (manifests.length === 0) {
+      const payload = {
+        findings: [],
+        note:
+          "No dependency manifests found. Supported: package-lock.json, yarn.lock, pnpm-lock.yaml, requirements.txt, poetry.lock, pyproject.toml",
+      };
+      await kvSet(cacheKey, payload, CACHE_TTL_SECONDS);
+      return Response.json(payload);
+    }
+
+    const deps: Dep[] = [];
+    const notes: string[] = [];
+    let unpinnedPy = 0;
+
+    for (const m of manifests) {
+      const file = zip.file(m);
+      if (!file) continue;
+
+      const text = await file.async("string");
+      const lower = m.toLowerCase();
+
+      if (lower.endsWith("package-lock.json")) {
+        deps.push(...extractFromPackageLock(text, m));
+      } else if (lower.endsWith("yarn.lock")) {
+        deps.push(...extractFromYarnLock(text, m));
+      } else if (lower.endsWith("pnpm-lock.yaml")) {
+        deps.push(...extractFromPnpmLock(text, m));
+      } else if (lower.endsWith("requirements.txt")) {
+        const out = extractFromRequirements(text, m);
+        deps.push(...out.deps);
+        unpinnedPy += out.unpinned;
+        if (out.note) notes.push(out.note);
+      } else if (lower.endsWith("poetry.lock")) {
+        deps.push(...extractFromPoetryLock(text, m));
+      } else if (lower.endsWith("pyproject.toml")) {
+        const out = extractFromPyProject(text, m);
+        deps.push(...out.deps);
+        unpinnedPy += out.unpinned;
+        if (out.note) notes.push(out.note);
       }
     }
 
-    // npm lock v1: { dependencies: { dep: { version, dependencies: {...} } } }
-    const walk = (deps: any) => {
-      if (!deps || typeof deps !== "object") return;
-      for (const [name, info] of Object.entries<any>(deps)) {
-        const ver = info?.version ? String(info.version) : "";
-        if (name && ver && !out.has(name)) out.set(String(name), ver);
-        if (info?.dependencies) walk(info.dependencies);
-      }
+    const unique = uniqDeps(deps);
+
+    if (unique.length === 0) {
+      const payload = {
+        findings: [],
+        note:
+          "Dependency manifests found, but no pinned dependencies could be extracted. If using ranges (^, ~, >=), pin exact versions for best CVE accuracy.",
+      };
+      await kvSet(cacheKey, payload, CACHE_TTL_SECONDS);
+      return Response.json(payload);
+    }
+
+    let scanList = unique;
+    if (scanList.length > maxDeps) {
+      scanList = scanList.slice(0, maxDeps);
+      notes.push(`Scanned first ${maxDeps} deps (found ${unique.length}). Increase maxDeps if needed.`);
+    }
+
+    if (unpinnedPy > 0) {
+      notes.push(`Skipped ${unpinnedPy} Python deps without exact pins (use == for best accuracy).`);
+    }
+
+    const { findings, osvNote } = await queryOsv(scanList);
+    if (osvNote) notes.push(osvNote);
+
+    const payload = {
+      findings,
+      note:
+        `Manifests: ${manifests.join(", ")}.\n` +
+        `Deps scanned: ${scanList.length}.\n` +
+        `Findings: ${findings.length}.\n` +
+        (notes.length ? notes.join("\n") : ""),
     };
 
-    if (obj?.dependencies) walk(obj.dependencies);
+    await kvSet(cacheKey, payload, CACHE_TTL_SECONDS);
+    return Response.json(payload);
+  } catch (err: any) {
+    return Response.json({ error: err?.message ?? "Dependency scan failed" }, { status: 500 });
+  }
+}
 
-    return [...out.entries()].map(([name, version]) => ({ name, version }));
+/* ---------------- helpers ---------------- */
+
+function clampInt(v: any, min: number, max: number) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+function normalizePath(p: string) {
+  return String(p || "").replaceAll("\\", "/");
+}
+
+function pickManifests(files: string[]) {
+  const wanted = [
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "requirements.txt",
+    "poetry.lock",
+    "pyproject.toml",
+  ];
+
+  const found: string[] = [];
+  for (const w of wanted) {
+    const hit =
+      files.find((p) => p.toLowerCase().endsWith(`/${w}`)) ??
+      files.find((p) => p.toLowerCase() === w);
+    if (hit) found.push(hit);
+  }
+  return found;
+}
+
+function uniqDeps(deps: Dep[]) {
+  const map = new Map<string, Dep>();
+  for (const d of deps) {
+    const key = `${d.ecosystem}:${d.name}@${d.version}`;
+    if (!map.has(key)) map.set(key, d);
+  }
+  return Array.from(map.values());
+}
+
+/* --------- extractors --------- */
+
+function extractFromPackageLock(text: string, source: string): Dep[] {
+  try {
+    const json = JSON.parse(text);
+    const out: Dep[] = [];
+
+    // lockfile v2/v3: packages object
+    if (json && typeof json === "object" && json.packages && typeof json.packages === "object") {
+      for (const k of Object.keys(json.packages)) {
+        const node = json.packages[k];
+        if (!node || typeof node !== "object") continue;
+        const name = node.name;
+        const version = node.version;
+        if (typeof name === "string" && typeof version === "string") {
+          out.push({ ecosystem: "npm", name, version, source });
+        }
+      }
+      return out;
+    }
+
+    // lockfile v1: dependencies tree
+    if (json && typeof json === "object" && json.dependencies && typeof json.dependencies === "object") {
+      walkNpmDeps(json.dependencies, out, source);
+      return out;
+    }
+
+    return [];
   } catch {
     return [];
   }
 }
 
-function parseRequirements(raw: string): Array<{ name: string; version: string }> {
-  const out: Array<{ name: string; version: string }> = [];
-  const lines = raw.replace(/\r/g, "").split("\n");
+function walkNpmDeps(tree: any, out: Dep[], source: string) {
+  if (!tree || typeof tree !== "object") return;
+  for (const name of Object.keys(tree)) {
+    const node = tree[name];
+    if (!node || typeof node !== "object") continue;
+    const version = node.version;
+    if (typeof version === "string") out.push({ ecosystem: "npm", name, version, source });
+    if (node.dependencies) walkNpmDeps(node.dependencies, out, source);
+  }
+}
 
-  for (const line of lines) {
-    const l = line.trim();
-    if (!l || l.startsWith("#")) continue;
-    if (l.startsWith("-r") || l.startsWith("--requirement")) continue;
-    if (l.startsWith("-e") || l.startsWith("--editable")) continue;
-    if (l.startsWith("--")) continue;
+function extractFromYarnLock(text: string, source: string): Dep[] {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const out: Dep[] = [];
+  let currentName: string | null = null;
 
-    // remove env markers ; python_version < "3.11"
-    const noMarker = l.split(";")[0].trim();
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
 
-    // exact pin only: name==1.2.3 or name===1.2.3
-    const m = noMarker.match(/^([A-Za-z0-9_.\-]+)(?:\[[^\]]+\])?\s*(===|==)\s*([^\s]+)$/);
+    // Key line: "pkg@^1.0.0", "pkg@~1.2.0":
+    if (!ln.startsWith(" ") && ln.trim().endsWith(":") && ln.includes("@")) {
+      const rawKey = ln.trim().replace(/:$/, "");
+      const first = rawKey.split(",")[0]?.trim();
+      const spec = first.replace(/^"|"$/g, "");
+      const at = spec.lastIndexOf("@");
+      if (at > 0) currentName = spec.slice(0, at);
+      else currentName = null;
+      continue;
+    }
+
+    if (!currentName) continue;
+
+    const m1 = ln.match(/^\s*version\s+"([^"]+)"/);
+    const m2 = ln.match(/^\s*version:\s*([^\s#]+)/);
+    const version = m1?.[1] ?? m2?.[1];
+
+    if (version) {
+      out.push({ ecosystem: "npm", name: currentName, version: String(version).trim(), source });
+      currentName = null;
+    }
+  }
+
+  return out;
+}
+
+function extractFromPnpmLock(text: string, source: string): Dep[] {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const out: Dep[] = [];
+  let inPackages = false;
+
+  for (const ln of lines) {
+    const t = ln.trimEnd();
+
+    if (!inPackages) {
+      if (t.trim() === "packages:" || t.trim() === "packages: {}") inPackages = true;
+      continue;
+    }
+
+    // "  /react@18.2.0:" or "  /@babel/core@7.22.0(...):"
+    const m = t.match(/^ {2}\/(.+?):\s*$/);
     if (!m) continue;
 
-    const name = m[1];
-    const version = m[3];
-    if (name && version) out.push({ name, version });
+    let key = m[1].trim().replace(/^"|"$/g, "");
+    const paren = key.indexOf("(");
+    if (paren >= 0) key = key.slice(0, paren);
+
+    const at = key.lastIndexOf("@");
+    if (at <= 0) continue;
+
+    const name = key.slice(0, at);
+    const version = key.slice(at + 1);
+    if (name && version) out.push({ ecosystem: "npm", name, version, source });
   }
+
   return out;
 }
 
-function extractCvssScore(vuln: any): number | null {
-  if (Array.isArray(vuln?.severity)) {
-    for (const s of vuln.severity) {
-      const score = s?.score;
-      const n = typeof score === "string" ? parseFloat(score) : typeof score === "number" ? score : NaN;
-      if (Number.isFinite(n)) return n;
+function extractFromRequirements(text: string, source: string): { deps: Dep[]; unpinned: number; note?: string } {
+  const out: Dep[] = [];
+  let unpinned = 0;
+
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  for (const ln of lines) {
+    const s = ln.trim();
+    if (!s || s.startsWith("#")) continue;
+    if (s.startsWith("-r ") || s.startsWith("--requirement")) continue;
+
+    const m = s.match(/^([A-Za-z0-9_.-]+)\s*==\s*([A-Za-z0-9_.+-]+)\s*(?:#.*)?$/);
+    if (!m) {
+      unpinned++;
+      continue;
     }
+    out.push({ ecosystem: "PyPI", name: m[1], version: m[2], source });
   }
-  const ds = vuln?.database_specific;
-  const n2 = typeof ds?.cvss === "number" ? ds.cvss : typeof ds?.cvss === "string" ? parseFloat(ds.cvss) : NaN;
-  return Number.isFinite(n2) ? n2 : null;
+
+  return { deps: out, unpinned, note: unpinned ? `requirements.txt had ${unpinned} unpinned entries.` : undefined };
 }
 
-function toSeverity(vuln: any): Severity {
-  const ds = vuln?.database_specific?.severity;
-  if (ds === "CRITICAL" || ds === "HIGH" || ds === "MEDIUM" || ds === "LOW") return ds;
+function extractFromPoetryLock(text: string, source: string): Dep[] {
+  const out: Dep[] = [];
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
 
-  const score = extractCvssScore(vuln);
-  if (score == null) return "MEDIUM";
-  if (score >= 9) return "CRITICAL";
-  if (score >= 7) return "HIGH";
-  if (score >= 4) return "MEDIUM";
-  return "LOW";
-}
+  let name: string | null = null;
+  let version: string | null = null;
 
-function pickFixedVersion(vuln: any, ecosystem: string, name: string): string | undefined {
-  const affected = Array.isArray(vuln?.affected) ? vuln.affected : [];
-  for (const a of affected) {
-    const pkg = a?.package;
-    if (!pkg) continue;
-    if (String(pkg.name || "") !== name) continue;
-    if (String(pkg.ecosystem || "") !== ecosystem) continue;
-
-    const ranges = Array.isArray(a?.ranges) ? a.ranges : [];
-    for (const r of ranges) {
-      const events = Array.isArray(r?.events) ? r.events : [];
-      for (const ev of events) {
-        if (ev?.fixed) return String(ev.fixed);
-      }
+  for (const ln of lines) {
+    if (ln.trim() === "[[package]]") {
+      if (name && version) out.push({ ecosystem: "PyPI", name, version, source });
+      name = null;
+      version = null;
+      continue;
     }
 
-    const fx = a?.database_specific?.fixed;
-    if (fx) return String(fx);
+    const mName = ln.match(/^\s*name\s*=\s*"([^"]+)"/);
+    if (mName) name = mName[1];
+
+    const mVer = ln.match(/^\s*version\s*=\s*"([^"]+)"/);
+    if (mVer) version = mVer[1];
   }
-  return undefined;
-}
 
-async function fetchJson(url: string, init: RequestInit, timeoutMs = 20_000) {
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { ...init, signal: ac.signal });
-    const text = await res.text();
-    let json: any = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      json = null;
-    }
-    return { ok: res.ok, status: res.status, json, text };
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-async function mapLimit<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<R>
-): Promise<R[]> {
-  const out: R[] = [];
-  let i = 0;
-  const workers = new Array(Math.max(1, limit)).fill(0).map(async () => {
-    while (i < items.length) {
-      const idx = i++;
-      out[idx] = await fn(items[idx]);
-    }
-  });
-  await Promise.all(workers);
+  if (name && version) out.push({ ecosystem: "PyPI", name, version, source });
   return out;
 }
 
-export async function POST(req: Request) {
-  try {
-    const body = BodySchema.parse(await req.json());
+function extractFromPyProject(text: string, source: string): { deps: Dep[]; unpinned: number; note?: string } {
+  const out: Dep[] = [];
+  let unpinned = 0;
 
-    // ✅ incluye maxVulns en cache key para que sea correcto
-    const cacheKey = `scan:deps:${body.analysisId}:${body.maxDeps}:${body.maxVulns}`;
+  const t = text.replace(/\r\n/g, "\n");
 
-    const cached = await kvGet<{
-      findings: DepCveFinding[];
-      note?: string;
-      scannedDeps?: number;
-      totalParsedDeps?: number;
-      manifestsUsed?: string[];
-      uniqueVulnIds?: number;
-      totalVulnHits?: number;
-      depsSample?: Array<{ ecosystem: string; name: string; version: string }>;
-      truncated?: boolean;
-    }>(cacheKey);
-
-    if (cached) return NextResponse.json(cached);
-
-    const meta = await kvGet<RepoMeta>(`repo:${body.analysisId}`);
-    if (!meta) return NextResponse.json({ error: "Repo not found" }, { status: 404 });
-
-    const zipBuf = await loadZip(body.analysisId);
-    const zip = await JSZip.loadAsync(zipBuf);
-
-    // Detect manifests (best-effort, MVP)
-    const pkgLockPath = bestMatchPath(meta.files, "package-lock.json");
-    const reqPath = bestMatchPath(meta.files, "requirements.txt");
-
-    const manifestsUsed: string[] = [];
-    if (pkgLockPath) manifestsUsed.push(pkgLockPath);
-    if (reqPath) manifestsUsed.push(reqPath);
-
-    const deps: Array<{ ecosystem: "npm" | "PyPI"; name: string; version: string }> = [];
-
-    // Read & parse package-lock
-    if (pkgLockPath) {
-      const actual = meta.root ? `${meta.root}/${pkgLockPath}` : pkgLockPath;
-      const f = zip.file(actual);
-      if (f) {
-        const raw = await f.async("string");
-        const parsed = parsePackageLock(raw);
-        parsed.forEach((d) => deps.push({ ecosystem: "npm", name: d.name, version: d.version }));
-      }
+  // PEP 621: dependencies = ["requests==2.31.0", ...]
+  const depArray = t.match(/^\s*dependencies\s*=\s*\[(.|\n)*?\]/m);
+  if (depArray) {
+    const chunk = depArray[0];
+    const matches = chunk.match(/"([^"]+)"/g) ?? [];
+    for (const q of matches) {
+      const entry = q.replace(/^"|"$/g, "");
+      const m = entry.match(/^([A-Za-z0-9_.-]+)\s*==\s*([A-Za-z0-9_.+-]+)$/);
+      if (m) out.push({ ecosystem: "PyPI", name: m[1], version: m[2], source });
+      else unpinned++;
     }
+  }
 
-    // Read & parse requirements.txt (pinned only)
-    if (reqPath) {
-      const actual = meta.root ? `${meta.root}/${reqPath}` : reqPath;
-      const f = zip.file(actual);
-      if (f) {
-        const raw = await f.async("string");
-        const parsed = parseRequirements(raw);
-        parsed.forEach((d) => deps.push({ ecosystem: "PyPI", name: d.name, version: d.version }));
-      }
+  // Poetry: [tool.poetry.dependencies] name = "1.2.3" (exact-ish)
+  const section = t.split(/\n\[\s*tool\.poetry\.dependencies\s*\]\n/i);
+  if (section.length > 1) {
+    const after = section[1];
+    const untilNext = after.split(/\n\[/)[0] ?? after;
+    const lines = untilNext.split("\n");
+
+    for (const ln of lines) {
+      const s = ln.trim();
+      if (!s || s.startsWith("#")) continue;
+      if (s.toLowerCase().startsWith("python")) continue;
+
+      const m = s.match(/^([A-Za-z0-9_.-]+)\s*=\s*"([^"]+)"\s*$/);
+      if (!m) continue;
+
+      const name = m[1];
+      const spec = m[2].trim();
+
+      if (/^\d+(\.\d+){1,3}$/.test(spec)) out.push({ ecosystem: "PyPI", name, version: spec, source });
+      else unpinned++;
     }
+  }
 
-    const totalParsedDeps = deps.length;
+  const note = unpinned ? `pyproject.toml had ${unpinned} non-exact dependency specs.` : undefined;
+  return { deps: out, unpinned, note };
+}
 
-    // De-dupe + cap
-    const seen = new Set<string>();
-    const deduped: typeof deps = [];
-    let truncated = false;
+/* --------- OSV query --------- */
 
-    for (const d of deps) {
-      const key = `${d.ecosystem}:${d.name}@${d.version}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      deduped.push(d);
-      if (deduped.length >= body.maxDeps) {
-        truncated = true;
-        break;
-      }
-    }
+async function queryOsv(deps: Dep[]): Promise<{ findings: DepCveFinding[]; osvNote?: string }> {
+  const findings: DepCveFinding[] = [];
+  const batches = chunk(deps, 350);
+  let totalVulns = 0;
 
-    // No manifests at all
-    if (!pkgLockPath && !reqPath) {
-      const payload = {
-        findings: [],
-        note:
-          "No dependency manifests detected. Add package-lock.json (npm) and/or requirements.txt (PyPI pinned with ==).",
-        scannedDeps: 0,
-        totalParsedDeps,
-        manifestsUsed: [],
-        uniqueVulnIds: 0,
-        totalVulnHits: 0,
-        depsSample: [],
-        truncated,
-      };
-      await kvSet(cacheKey, payload, 60 * 30);
-      return NextResponse.json(payload);
-    }
-
-    // Manifests exist but no pinned deps extracted
-    if (!deduped.length) {
-      const payload = {
-        findings: [],
-        note:
-          "Manifests detected but no pinned dependencies found to scan. For npm, include package-lock.json. For Python, pin versions in requirements.txt using ==.",
-        scannedDeps: 0,
-        totalParsedDeps,
-        manifestsUsed,
-        uniqueVulnIds: 0,
-        totalVulnHits: 0,
-        depsSample: [],
-        truncated,
-      };
-      await kvSet(cacheKey, payload, 60 * 30);
-      return NextResponse.json(payload);
-    }
-
-    // Querybatch (IDs only)
-    const queryBody = {
-      queries: deduped.map((d) => ({
+  for (const batch of batches) {
+    const body = {
+      queries: batch.map((d) => ({
         package: { ecosystem: d.ecosystem, name: d.name },
         version: d.version,
       })),
     };
 
-    const qb = await fetchJson("https://api.osv.dev/v1/querybatch", {
+    const res = await fetch("https://api.osv.dev/v1/querybatch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(queryBody),
+      body: JSON.stringify(body),
     });
 
-    if (!qb.ok) {
-      const msg = `OSV querybatch failed (${qb.status})`;
-      const status = qb.status === 429 ? 429 : 502;
-      return NextResponse.json(
-        { error: msg, details: (qb.text ?? "").slice(0, 500) },
-        { status }
-      );
+    if (!res.ok) {
+      return { findings, osvNote: `OSV querybatch failed (${res.status}).` };
     }
 
-    const results = Array.isArray(qb.json?.results) ? qb.json.results : [];
+    const data = await res.json();
+    const results = Array.isArray(data?.results) ? data.results : [];
 
-    // results[i].vulns = [{id, modified}] (IDs only)
-    const depToVulnIds: Array<{ dep: (typeof deduped)[number]; ids: string[] }> = deduped.map((d, i) => {
-      const vulns = Array.isArray(results?.[i]?.vulns) ? results[i].vulns : [];
-      const ids = vulns.map((v: any) => String(v?.id || "")).filter(Boolean);
-      return { dep: d, ids };
-    });
+    for (let i = 0; i < results.length; i++) {
+      const dep = batch[i];
+      const vulns = Array.isArray(results[i]?.vulns) ? results[i].vulns : [];
+      totalVulns += vulns.length;
 
-    const uniqueIds = new Set<string>();
-    let totalVulnHits = 0;
-    for (const x of depToVulnIds) {
-      totalVulnHits += x.ids.length;
-      for (const vid of x.ids) uniqueIds.add(vid);
-    }
+      for (const v of vulns) {
+        const vulnId = String(v?.id ?? "");
+        const summary = String(v?.summary ?? "Vulnerability");
+        const details = safeTrim(String(v?.details ?? ""), 1200);
 
-    const cappedIds = [...uniqueIds].slice(0, body.maxVulns);
+        const sev = severityFromOsv(v);
+        const fixedVersion = pickFixedVersionFor(dep, v);
 
-    // Fetch vuln details (limited concurrency)
-    const vulnDetailsArr = await mapLimit(cappedIds, 10, async (vid) => {
-      const r = await fetchJson(`https://api.osv.dev/v1/vulns/${encodeURIComponent(vid)}`, {
-        method: "GET",
-        headers: { "Content-Type": "application/json" },
-      });
-      return { vid, ok: r.ok, status: r.status, json: r.json, text: r.text };
-    });
-
-    const vulnMap = new Map<string, any>();
-    for (const v of vulnDetailsArr) {
-      if (v.ok && v.json) vulnMap.set(v.vid, v.json);
-    }
-
-    const findings: DepCveFinding[] = [];
-    for (const x of depToVulnIds) {
-      for (const vid of x.ids) {
-        const detail = vulnMap.get(vid);
-        if (!detail) continue;
-
-        const severity = toSeverity(detail);
-        const fixedVersion = pickFixedVersion(detail, x.dep.ecosystem, x.dep.name);
-
-        const summary =
-          String(detail?.summary || "").trim() ||
-          String(detail?.details || "").trim().slice(0, 180) ||
-          "Vulnerability reported by OSV";
-
-        const details = String(detail?.details || "").trim().slice(0, 1800);
-
-        const refs = Array.isArray(detail?.references)
-          ? detail.references.map((r: any) => String(r?.url || "")).filter(Boolean).slice(0, 4)
+        const refs = Array.isArray(v?.references)
+          ? v.references.map((r: any) => String(r?.url ?? "")).filter(Boolean).slice(0, 6)
           : [];
 
         findings.push({
-          id: `${x.dep.ecosystem}:${x.dep.name}@${x.dep.version}:${vid}`,
-          ecosystem: x.dep.ecosystem,
-          name: x.dep.name,
-          version: x.dep.version,
-          vulnId: vid,
-          severity,
+          id: `${dep.ecosystem}:${dep.name}@${dep.version}:${vulnId}`,
+          ecosystem: dep.ecosystem,
+          name: dep.name,
+          version: dep.version,
+          vulnId,
+          severity: sev,
           summary,
           details: details || undefined,
           fixedVersion: fixedVersion || undefined,
@@ -385,37 +418,113 @@ export async function POST(req: Request) {
         });
       }
     }
-
-    findings.sort((a, b) => sevRank(a.severity) - sevRank(b.severity));
-
-    // ✅ nota mucho más clara para demo/UX
-    const usedParts: string[] = [];
-    if (pkgLockPath) usedParts.push("npm: package-lock.json");
-    if (reqPath) usedParts.push("PyPI: requirements.txt");
-
-    let note = `Scanned dependencies via OSV (${usedParts.join(", ")}). `;
-    note += `deps(parsed=${totalParsedDeps}, scanned=${deduped.length}${truncated ? ", truncated" : ""}); `;
-    note += `vulns(hits=${totalVulnHits}, unique=${uniqueIds.size}${uniqueIds.size > body.maxVulns ? ", capped" : ""}).`;
-    if (findings.length === 0) note += " No dependency CVEs found ✅.";
-
-    const payload = {
-      findings,
-      note,
-      // ✅ telemetría extra (no rompe UI)
-      scannedDeps: deduped.length,
-      totalParsedDeps,
-      manifestsUsed,
-      uniqueVulnIds: uniqueIds.size,
-      totalVulnHits,
-      depsSample: deduped.slice(0, 8).map((d) => ({ ecosystem: d.ecosystem, name: d.name, version: d.version })),
-      truncated,
-    };
-
-    await kvSet(cacheKey, payload, 60 * 30);
-    return NextResponse.json(payload);
-  } catch (err) {
-    const msg = toMsg(err);
-    const status = isQuota(msg) ? 429 : 500;
-    return NextResponse.json({ error: msg }, { status });
   }
+
+  findings.sort((a, b) => {
+    const d = severityRank(b.severity) - severityRank(a.severity);
+    if (d) return d;
+    return `${a.name}@${a.version}`.localeCompare(`${b.name}@${b.version}`);
+  });
+
+  const osvNote = totalVulns === 0 ? "No dependency CVEs found ✅ (good news)." : undefined;
+  return { findings, osvNote };
+}
+
+function safeTrim(s: string, max: number) {
+  const t = s.trim();
+  if (t.length <= max) return t;
+  return t.slice(0, max) + "\n…";
+}
+
+function severityRank(s: Severity) {
+  return s === "CRITICAL" ? 4 : s === "HIGH" ? 3 : s === "MEDIUM" ? 2 : 1;
+}
+
+function severityFromOsv(v: any): Severity {
+  // OSV often includes: severity: [{type:"CVSS_V3", score:"9.8"}]
+  const arr = Array.isArray(v?.severity) ? v.severity : [];
+  for (const s of arr) {
+    const score = Number(s?.score);
+    if (Number.isFinite(score)) {
+      if (score >= 9) return "CRITICAL";
+      if (score >= 7) return "HIGH";
+      if (score >= 4) return "MEDIUM";
+      return "LOW";
+    }
+  }
+
+  const ds = String(v?.database_specific?.severity ?? "").toUpperCase();
+  if (ds === "CRITICAL" || ds === "HIGH" || ds === "MEDIUM" || ds === "LOW") return ds as Severity;
+
+  return "MEDIUM";
+}
+
+function pickFixedVersionFor(dep: Dep, vuln: any): string | "" {
+  const affected = Array.isArray(vuln?.affected) ? vuln.affected : [];
+  const fixeds: string[] = [];
+
+  for (const a of affected) {
+    const ranges = Array.isArray(a?.ranges) ? a.ranges : [];
+    for (const r of ranges) {
+      const events = Array.isArray(r?.events) ? r.events : [];
+      for (const e of events) {
+        if (e?.fixed) fixeds.push(String(e.fixed));
+      }
+    }
+  }
+
+  if (!fixeds.length) return "";
+
+  const current = dep.version;
+
+  if (dep.ecosystem === "npm") {
+    const sorted = fixeds
+      .filter((x) => !!parseSemver(x))
+      .sort((a, b) => (semverGt(a, b) ? 1 : -1));
+    for (const fx of sorted) {
+      if (semverGt(fx, current)) return fx;
+    }
+    return sorted[0] ?? "";
+  }
+
+  const sorted = fixeds.sort((a, b) => (pep440Gt(a, b) ? 1 : -1));
+  for (const fx of sorted) {
+    if (pep440Gt(fx, current)) return fx;
+  }
+  return sorted[0] ?? "";
+}
+
+function parseSemver(v: string): [number, number, number] | null {
+  const m = String(v).trim().match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+function semverGt(a: string, b: string) {
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  if (!pa || !pb) return a.localeCompare(b) > 0;
+  if (pa[0] !== pb[0]) return pa[0] > pb[0];
+  if (pa[1] !== pb[1]) return pa[1] > pb[1];
+  return pa[2] > pb[2];
+}
+function pep440Gt(a: string, b: string) {
+  const na = pepNums(a);
+  const nb = pepNums(b);
+  const L = Math.max(na.length, nb.length);
+  for (let i = 0; i < L; i++) {
+    const ai = na[i] ?? 0;
+    const bi = nb[i] ?? 0;
+    if (ai !== bi) return ai > bi;
+  }
+  return false;
+}
+function pepNums(v: string) {
+  const parts = String(v).split(/[^0-9]+/).filter(Boolean).map((x) => Number(x));
+  return parts.length ? parts : [0];
+}
+
+function chunk<T>(arr: T[], size: number) {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 }

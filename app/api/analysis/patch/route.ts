@@ -6,6 +6,7 @@ import { loadZip } from "@/lib/repo/zip-store";
 import { genai } from "@/lib/genai/client";
 import { MODELS } from "@/lib/genai/models";
 import { ThinkingLevel } from "@google/genai";
+import { createTwoFilesPatch } from "diff";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,27 +44,28 @@ function isQuota(msg: string) {
   );
 }
 
+function stripCodeFences(s: string) {
+  const t = String(s ?? "").trim();
+  if (t.startsWith("```")) {
+    return t.replace(/^```[a-z]*\s*/i, "").replace(/```$/i, "").trim();
+  }
+  return t;
+}
+
 /**
- * Minimal unified diff generator for demo.
- * It outputs a full-file replacement diff (works great for hackathon demo).
+ * Unified diff REAL por líneas (con contexto).
+ * Evita el "full-file replacement diff" que hace parecer que TODO cambió.
  */
-function unifiedDiff(path: string, oldText: string, newText: string) {
-  const oldLines = oldText.replace(/\r/g, "").split("\n");
-  const newLines = newText.replace(/\r/g, "").split("\n");
+function makeUnifiedPatch(path: string, oldText: string, newText: string) {
+  const a = `a/${path}`;
+  const b = `b/${path}`;
 
-  const header = [
-    `diff --git a/${path} b/${path}`,
-    `index 0000000..1111111 100644`,
-    `--- a/${path}`,
-    `+++ b/${path}`,
-    `@@ -1,${oldLines.length} +1,${newLines.length} @@`,
-  ];
+  const patch = createTwoFilesPatch(a, b, oldText, newText, "", "", { context: 3 });
 
-  const body: string[] = [];
-  for (const l of oldLines) body.push(`-${l}`);
-  for (const l of newLines) body.push(`+${l}`);
+  const header = `diff --git ${a} ${b}\n`;
+  const cleaned = patch.replace(/^Index:.*\n/gm, "").replace(/^=+\n/gm, "");
 
-  return [...header, ...body].join("\n");
+  return header + cleaned.trim() + "\n";
 }
 
 export async function POST(req: Request) {
@@ -78,7 +80,9 @@ export async function POST(req: Request) {
     if (!meta) return NextResponse.json({ error: "Repo not found" }, { status: 404 });
 
     const zipBuf = await loadZip(body.analysisId);
-    const zip = await JSZip.loadAsync(zipBuf);
+    if (!zipBuf) return NextResponse.json({ error: "Missing ZIP for analysisId" }, { status: 404 });
+
+    const zip = await JSZip.loadAsync(zipBuf as any);
 
     const actualPath = meta.root ? `${meta.root}/${body.file}` : body.file;
     const f = zip.file(actualPath);
@@ -86,12 +90,11 @@ export async function POST(req: Request) {
 
     const original = await f.async("string");
 
-    // Keep token usage down: send first N chars
-    const MAX_INPUT_CHARS = 18_000;
-    const clipped = original.slice(0, MAX_INPUT_CHARS);
+    const MAX_CHARS = 18_000;
+    const clipped = original.slice(0, MAX_CHARS);
     const truncatedNote =
-      original.length > MAX_INPUT_CHARS
-        ? `NOTE: File was truncated to first ${MAX_INPUT_CHARS} characters for patch generation.`
+      original.length > MAX_CHARS
+        ? `NOTE: File was truncated to first ${MAX_CHARS} characters for patch generation.`
         : "";
 
     const prompt = [
@@ -112,30 +115,29 @@ export async function POST(req: Request) {
       .filter(Boolean)
       .join("\n");
 
+    // ✅ FIX: contents tipado correcto + config correcto
     const res = await genai.models.generateContent({
-      model: MODELS.fast, // Gemini 3 Flash
-      contents: prompt,
-      config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
+      model: MODELS.fast,
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: {
+        temperature: 0.2,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      },
     });
 
-    const updatedFull = (res.text ?? "").trim();
-    if (!updatedFull) {
+    const updated = stripCodeFences(res.text ?? "").trim();
+    if (!updated) {
       return NextResponse.json({ error: "Gemini returned empty patch." }, { status: 500 });
     }
 
-    const diff = unifiedDiff(body.file, original, updatedFull);
-
-    // Return updated content for UI preview (cap size to avoid huge payloads)
-    const MAX_RETURN_CHARS = 250_000;
-    const updatedTruncated = updatedFull.length > MAX_RETURN_CHARS;
-    const updated = updatedTruncated ? updatedFull.slice(0, MAX_RETURN_CHARS) : updatedFull;
+    const diff = makeUnifiedPatch(body.file, original, updated);
 
     return NextResponse.json({
       file: body.file,
       diff,
+      original,
       updated,
-      updatedTruncated,
-      note: original.length > MAX_INPUT_CHARS ? "Patch generated from truncated input; review carefully." : undefined,
+      note: original.length > MAX_CHARS ? "Patch generated from truncated input; review carefully." : undefined,
     });
   } catch (err) {
     const msg = toMsg(err);
