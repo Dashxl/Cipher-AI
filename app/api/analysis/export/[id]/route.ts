@@ -10,7 +10,6 @@ export const dynamic = "force-dynamic";
 type VulnCache = { findings: VulnFinding[]; note?: string };
 type DebtCache = { issues: DebtIssue[]; note?: string };
 
-// New: deps cache shape (OSV)
 type DepsCache = {
   findings: DepCveFinding[];
   note?: string;
@@ -20,6 +19,15 @@ type DepsCache = {
   uniqueVulnIds?: number;
   totalVulnHits?: number;
   truncated?: boolean;
+};
+
+type PatchCache = {
+  analysisId: string;
+  patchedCount: number;
+  patchedFiles: string[];
+  exportedAt?: string;
+  updatedAt?: string;
+  source?: string;
 };
 
 function sevRank(s: Severity) {
@@ -36,7 +44,7 @@ function safeName(s: string) {
 
 /**
  * pdf-lib standard fonts use WinAnsi encoding and can't draw many unicode chars.
- * We convert common unicode symbols to ASCII and replace the rest with '?'.
+ * Convert common unicode symbols to ASCII and replace the rest with '?'.
  */
 function toWinAnsiSafe(s: string) {
   return (s ?? "")
@@ -66,6 +74,13 @@ function safeTextForPdf(s: string) {
   return out;
 }
 
+// ✅ Make a REAL ArrayBuffer (not ArrayBufferLike) to satisfy TS
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const ab = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(ab).set(bytes);
+  return ab;
+}
+
 async function kvGetFirst<T>(keys: string[]): Promise<T | null> {
   for (const k of keys) {
     const v = await kvGet<T>(k);
@@ -80,8 +95,9 @@ function makeMarkdownReport(params: {
   vuln: VulnCache | null;
   debt: DebtCache | null;
   deps: DepsCache | null;
+  patches: PatchCache | null;
 }) {
-  const { id, status, vuln, debt, deps } = params;
+  const { id, status, vuln, debt, deps, patches } = params;
 
   const repoName = status?.result?.repoName ?? "(unknown repo)";
   const generatedAt = new Date().toISOString();
@@ -93,6 +109,29 @@ function makeMarkdownReport(params: {
   lines.push(`- **Repository:** ${mdEscape(repoName)}`);
   lines.push(`- **Generated at:** ${generatedAt}`);
   lines.push(``);
+
+  // ✅ Patch previews applied
+  lines.push(`## Patch previews applied`);
+  lines.push(``);
+  if (!patches || !patches.patchedCount || (patches.patchedFiles ?? []).length === 0) {
+    lines.push(
+      `No patch previews recorded. (Tip: click "Apply preview" in UI and wait ~1s, or export patched ZIP once.)`
+    );
+    lines.push(``);
+  } else {
+    lines.push(`Patched files: **${patches.patchedCount}**`);
+    if (patches.updatedAt) lines.push(`- Updated at: ${patches.updatedAt}`);
+    if (patches.source) lines.push(`- Source: ${patches.source}`);
+    lines.push(``);
+    for (const p of (patches.patchedFiles ?? []).slice(0, 200)) {
+      lines.push(`- ${mdEscape(p)}`);
+    }
+    if ((patches.patchedFiles ?? []).length > 200) {
+      lines.push(``);
+      lines.push(`> Showing first 200 patched files.`);
+    }
+    lines.push(``);
+  }
 
   // Architecture
   lines.push(`## Architecture`);
@@ -302,7 +341,7 @@ async function markdownToPdfBytes(md: string) {
     }
   }
 
-  return await doc.save();
+  return await doc.save(); // Uint8Array
 }
 
 export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
@@ -313,26 +352,30 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
 
     const status = await kvGet<AnalysisStatus>(`analysis:${id}`);
 
-    // Cache keys (match defaults used in scan endpoints)
     const vuln = await kvGet<VulnCache>(`scan:vuln:${id}:160:80`);
     const debt = await kvGet<DebtCache>(`scan:debt:${id}:220:90`);
 
-    // Deps: try common keys (because params can vary)
     const deps = await kvGetFirst<DepsCache>([
       `scan:deps:${id}:300:300`,
       `scan:deps:${id}:200:200`,
-      `scan:deps:${id}:200`, // older key versions
+      `scan:deps:${id}:200`,
     ]);
 
-    const md = makeMarkdownReport({ id, status, vuln, debt, deps });
+    // ✅ patches index (from UI apply preview OR export patched ZIP)
+    const patches = await kvGet<PatchCache>(`patches:${id}`);
+
+    const md = makeMarkdownReport({ id, status, vuln, debt, deps, patches });
     const name = safeName(status?.result?.repoName ?? "cipher-ai");
 
     if (format === "pdf") {
-      const pdfBytes = await markdownToPdfBytes(md);
-      return new NextResponse(Buffer.from(pdfBytes), {
+      const pdfU8 = await markdownToPdfBytes(md);
+      const pdfAb = toArrayBuffer(pdfU8);
+
+      return new NextResponse(pdfAb, {
         headers: {
           "Content-Type": "application/pdf",
           "Content-Disposition": `attachment; filename="CipherAI_Report_${name}.pdf"`,
+          "Cache-Control": "no-store",
         },
       });
     }
@@ -341,6 +384,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       headers: {
         "Content-Type": "text/markdown; charset=utf-8",
         "Content-Disposition": `attachment; filename="CipherAI_Report_${name}.md"`,
+        "Cache-Control": "no-store",
       },
     });
   } catch (err) {

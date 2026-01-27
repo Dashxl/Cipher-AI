@@ -36,11 +36,13 @@ function toMsg(err: unknown) {
 }
 
 function isQuota(msg: string) {
+  const m = msg.toLowerCase();
   return (
-    msg.includes("RESOURCE_EXHAUSTED") ||
-    msg.includes("429") ||
-    msg.includes("Quota exceeded") ||
-    msg.includes("exceeded your current quota")
+    m.includes("resource_exhausted") ||
+    m.includes("429") ||
+    m.includes("quota exceeded") ||
+    m.includes("exceeded your current quota") ||
+    m.includes("rate limit")
   );
 }
 
@@ -115,7 +117,6 @@ export async function POST(req: Request) {
       .filter(Boolean)
       .join("\n");
 
-    // ✅ FIX: contents tipado correcto + config correcto
     const res = await genai.models.generateContent({
       model: MODELS.fast,
       contents: [{ role: "user", parts: [{ text: prompt }] }],
@@ -141,7 +142,16 @@ export async function POST(req: Request) {
     });
   } catch (err) {
     const msg = toMsg(err);
-    const status = isQuota(msg) ? 429 : 500;
-    return NextResponse.json({ error: msg }, { status });
+    if (isQuota(msg)) {
+      return NextResponse.json(
+        {
+          errorCode: "RATE_LIMIT",
+          error: "Gemini rate limit reached. Try again in ~60s.",
+          detail: msg,
+        },
+        { status: 429, headers: { "Retry-After": "60" } }
+      );
+    }
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

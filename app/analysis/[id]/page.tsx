@@ -60,6 +60,24 @@ async function safeJson(res: Response): Promise<any> {
   }
 }
 
+function isRateLimit(res: Response, data: any) {
+  return res.status === 429 || String(data?.errorCode ?? "") === "RATE_LIMIT";
+}
+
+function friendlyError(res: Response, data: any) {
+  const retryAfter = Number(res.headers.get("retry-after") || "");
+  const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? `${retryAfter}s` : "30–60s";
+
+  if (isRateLimit(res, data)) {
+    return `Rate limit de Gemini. Intenta de nuevo en ${wait}. (Tip: en Docs usa maxFiles=5)`;
+  }
+  return String(data?.error ?? `Request failed (${res.status})`);
+}
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 function severityRank(s: Severity) {
   return s === "CRITICAL" ? 4 : s === "HIGH" ? 3 : s === "MEDIUM" ? 2 : 1;
 }
@@ -153,6 +171,25 @@ export default function AnalysisPage() {
   const copyTimer = useRef<number | null>(null);
   const downloadTimer = useRef<number | null>(null);
   const msgTimer = useRef<number | null>(null);
+  const didLoadPatchedFromLS = useRef(false);
+  const savePatchesTimer = useRef<number | null>(null);
+
+  async function persistPatchIndexToServer(nextPatchedByFile: Record<string, string>) {
+  try {
+    const patchedFiles = Object.keys(nextPatchedByFile || {})
+      .map((p) => normalizePath(p))
+      .filter(Boolean)
+      .slice(0, 200);
+
+    await fetch("/api/analysis/patches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ analysisId: id, patchedFiles }),
+    });
+  } catch {
+    // best-effort: si falla, no rompemos UX
+  }
+}
 
   function flashCopy() {
     if (copyTimer.current) window.clearTimeout(copyTimer.current);
@@ -294,8 +331,9 @@ export default function AnalysisPage() {
       const mode = rawMode ? (JSON.parse(rawMode) as Record<string, "original" | "patched">) : {};
       setPatchedByFile(patched || {});
       setModeByFile(mode || {});
+      didLoadPatchedFromLS.current = true;
     } catch {
-      // ignore
+      didLoadPatchedFromLS.current = true;
     }
   }, [id]);
 
@@ -311,9 +349,56 @@ export default function AnalysisPage() {
     }
   }, [patchedByFile, modeByFile, id]);
 
+    // ✅ Sync patch previews to server (so Export MD/PDF can include them even without exporting ZIP)
+  useEffect(() => {
+    if (!id) return;
+
+    // Important: evita “wipe” al inicio antes de cargar LS
+    if (!didLoadPatchedFromLS.current) return;
+
+    if (savePatchesTimer.current) window.clearTimeout(savePatchesTimer.current);
+
+    savePatchesTimer.current = window.setTimeout(async () => {
+      try {
+        const patchedFilesFull = Object.entries(patchedByFile || {})
+          .map(([path, content]) => ({
+            path: normalizePath(path),
+            content: String(content ?? ""),
+          }))
+          .filter((f) => f.path && f.content.trim().length > 0)
+          .slice(0, 200);
+
+        let payload: any = { analysisId: id, patchedFiles: patchedFilesFull };
+
+        // Si el payload es grande, manda solo paths (igual sirve para el reporte)
+        const approxLen = JSON.stringify(payload).length;
+        if (approxLen > 900_000) {
+          payload = {
+            analysisId: id,
+            patchedFiles: patchedFilesFull.map((f) => ({ path: f.path })),
+            truncated: true,
+          };
+        }
+
+        await fetch("/api/analysis/patches/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } catch {
+        // silencioso (no spamear UI)
+      }
+    }, 900);
+
+    return () => {
+      if (savePatchesTimer.current) window.clearTimeout(savePatchesTimer.current);
+    };
+  }, [id, patchedByFile]);
+
   function clearAllPreviews() {
     setPatchedByFile({});
     setModeByFile({});
+    void persistPatchIndexToServer({});
     try {
       localStorage.removeItem(`${LS_PATCHED_PREFIX}${id}`);
       localStorage.removeItem(`${LS_MODE_PREFIX}${id}`);
@@ -429,19 +514,22 @@ export default function AnalysisPage() {
   }
 
   function revertPatchForSelected() {
-    if (!selected) return;
-    const p = normalizePath(selected);
-    setPatchedByFile((prev) => {
-      const next = { ...prev };
-      delete next[p];
-      return next;
-    });
-    setModeByFile((prev) => ({ ...prev, [p]: "original" }));
-    setViewMode("original");
-    const orig = originalByFile[p];
-    if (typeof orig === "string") setCode(orig);
-    flashMsg("Reverted patch preview ✅");
-  }
+  if (!selected) return;
+  const p = normalizePath(selected);
+
+  setPatchedByFile((prev) => {
+    const next = { ...prev };
+    delete next[p];
+    void persistPatchIndexToServer(next);
+    return next;
+  });
+
+  setModeByFile((prev) => ({ ...prev, [p]: "original" }));
+  setViewMode("original");
+  const orig = originalByFile[p];
+  if (typeof orig === "string") setCode(orig);
+  flashMsg("Reverted patch preview ✅");
+}
 
   async function runExplain(mode: "tech" | "eli5") {
     if (!selected) return;
@@ -527,25 +615,57 @@ export default function AnalysisPage() {
   }, [docsIndex, docsQ]);
 
   async function generateDocsIndex() {
-    setDocsIndexBusy(true);
-    setDocsErr("");
-    try {
+  setDocsIndexBusy(true);
+  setDocsErr("");
+
+  const payload = { analysisId: id, mode: "index", maxFiles: 5 };
+
+  try {
+    // ✅ retry con backoff si es 429
+    let lastRes: Response | null = null;
+    let lastData: any = null;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
       const res = await fetch("/api/analysis/docs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ analysisId: id, mode: "index", maxFiles: 5 }),
+        body: JSON.stringify(payload),
       });
+
+      lastRes = res;
+
+      if (res.status === 429 && attempt < 2) {
+        // backoff progresivo
+        await sleep(attempt === 0 ? 700 : 1500);
+        continue;
+      }
+
       const data = await safeJson(res);
+      lastData = data;
+
       if (!res.ok) {
-        setDocsErr(data.error ?? `Docs index failed (${res.status})`);
+        const msg = friendlyError(res, data);
+        setDocsErr(msg);
+        flashMsg("Docs index failed ❌");
         return;
       }
+
       setDocsIndex(Array.isArray(data.items) ? data.items : []);
       flashMsg("Docs index ready ✅");
-    } finally {
-      setDocsIndexBusy(false);
+      return;
     }
+
+    // si llegó aquí, falló por 429 múltiples veces
+    if (lastRes) {
+      const msg = lastData ? friendlyError(lastRes, lastData) : "Rate limit de Gemini. Intenta en 30–60s.";
+      setDocsErr(msg);
+    } else {
+      setDocsErr("Docs index failed.");
+    }
+  } finally {
+    setDocsIndexBusy(false);
   }
+}
 
   async function openDoc(path: string) {
     setDocSelected(path);
@@ -560,7 +680,7 @@ export default function AnalysisPage() {
       });
       const data = await safeJson(res);
       if (!res.ok) {
-        setDocsErr(data.error ?? `Docs failed (${res.status})`);
+        setDocsErr(friendlyError(res, data));
         return;
       }
       setDoc(data.doc ?? null);
@@ -587,6 +707,66 @@ export default function AnalysisPage() {
     a.remove();
     URL.revokeObjectURL(url);
   }
+
+  function filenameFromContentDisposition(cd: string | null) {
+  if (!cd) return "";
+  // filename="x.zip" OR filename*=UTF-8''x.zip
+  const mStar = cd.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+  if (mStar?.[1]) return decodeURIComponent(mStar[1]).replace(/["']/g, "").trim();
+
+  const m = cd.match(/filename\s*=\s*("?)([^"]+)\1/i);
+  return m?.[2]?.trim() ?? "";
+}
+
+async function exportPatchedZip() {
+  try {
+    const patchedFiles = Object.entries(patchedByFile || {})
+      .map(([path, content]) => ({
+        path: normalizePath(path),
+        content: String(content ?? ""),
+      }))
+      .filter((f) => f.path && f.content.trim().length > 0)
+      .slice(0, 200);
+
+    if (patchedFiles.length === 0) {
+      flashMsg("No patched previews to export.");
+      return;
+    }
+
+    const res = await fetch("/api/analysis/export/zip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ analysisId: id, patchedFiles }),
+    });
+
+    if (!res.ok) {
+      // en error sí intentamos JSON
+      const data = await safeJson(res);
+      alert(data.error ?? `Export failed (${res.status})`);
+      return;
+    }
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+
+    const cd = res.headers.get("Content-Disposition");
+    const headerName = filenameFromContentDisposition(cd);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = headerName || `cipherai-${id}-patched.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    // revoke un poco después para evitar descargas truncadas en algunos browsers
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+    flashMsg("Exported patched ZIP ✅");
+  } catch (err: any) {
+    alert(err?.message ?? "Export failed");
+  }
+}
 
   // ✅ Smart unified diff
   function buildSmartDiff(file: string, oldText: string, newText: string) {
@@ -616,7 +796,8 @@ export default function AnalysisPage() {
       const data = await safeJson(res);
 
       if (!res.ok) {
-        alert(data.error ?? `Patch failed (${res.status})`);
+        const msg = friendlyError(res, data);
+        flashMsg(msg);
         return;
       }
 
@@ -680,23 +861,28 @@ export default function AnalysisPage() {
 
   // ✅ Apply patch preview (persist)
   function applyPatchPreview() {
-    if (!patch) return;
-    const p = normalizePath(patch.file);
+  if (!patch) return;
+  const p = normalizePath(patch.file);
 
-    setPatchedByFile((prev) => ({ ...prev, [p]: patch.updated }));
-    setModeByFile((prev) => ({ ...prev, [p]: "patched" }));
-    setOriginalByFile((prev) => (prev[p] ? prev : { ...prev, [p]: patch.original }));
+  setPatchedByFile((prev) => {
+    const next = { ...prev, [p]: patch.updated };
+    void persistPatchIndexToServer(next);
+    return next;
+  });
 
-    closePatchModal();
-    setTab("explore");
-    setSelected(p);
-    setExplain("");
-    setViewMode("patched");
-    setCode(patch.updated);
+  setModeByFile((prev) => ({ ...prev, [p]: "patched" }));
+  setOriginalByFile((prev) => (prev[p] ? prev : { ...prev, [p]: patch.original }));
 
-    flashMsg("Applied patch preview ✅");
-    if (patch.targetLine) setPendingReveal({ file: p, line: patch.targetLine });
-  }
+  closePatchModal();
+  setTab("explore");
+  setSelected(p);
+  setExplain("");
+  setViewMode("patched");
+  setCode(patch.updated);
+
+  flashMsg("Applied patch preview ✅");
+  if (patch.targetLine) setPendingReveal({ file: p, line: patch.targetLine });
+}
 
   // counts
   const vulnCountsAll = useMemo(() => countBySeverity(vulns), [vulns]);
@@ -939,6 +1125,11 @@ export default function AnalysisPage() {
             <Button variant="secondary" onClick={exportPdf}>
               Export PDF
             </Button>
+            {patchedCount > 0 && (
+              <Button onClick={exportPatchedZip} title="Download a ZIP with your applied previews">
+                Export patched ZIP
+              </Button>
+            )}
           </div>
         </CardHeader>
 

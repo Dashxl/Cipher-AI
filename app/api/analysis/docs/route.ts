@@ -231,7 +231,28 @@ export async function POST(req: Request) {
     await kvSet(docKey, doc, TTL);
 
     return NextResponse.json({ doc });
-  } catch (err: any) {
-    return NextResponse.json({ error: err?.message ?? "Docs failed" }, { status: 500 });
+    } catch (err: any) {
+    const msg = String(err?.message ?? "Docs failed");
+    const lower = msg.toLowerCase();
+    const isQuota =
+      lower.includes("resource_exhausted") ||
+      lower.includes("429") ||
+      lower.includes("quota exceeded") ||
+      lower.includes("exceeded your current quota") ||
+      lower.includes("rate limit");
+
+    if (isQuota) {
+      return NextResponse.json(
+        {
+          errorCode: "RATE_LIMIT",
+          error: "Gemini rate limit reached while generating docs. Try again in ~60s.",
+          detail: msg,
+        },
+        { status: 429, headers: { "Retry-After": "60" } }
+      );
+    }
+
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
+
 }
