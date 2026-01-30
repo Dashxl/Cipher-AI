@@ -88,6 +88,34 @@ function normalizePath(p: string) {
   return String(p || "").replaceAll("\\", "/");
 }
 
+function normalizeBulletList(input: any): string[] {
+  if (!Array.isArray(input)) return [];
+
+  return input
+    .map((x) => {
+      if (typeof x === "string") return x.trim();
+      if (typeof x === "number" || typeof x === "boolean") return String(x);
+
+      if (x && typeof x === "object") {
+        const sev = x.severity ? `[${String(x.severity)}] ` : "";
+        const title = x.title ? String(x.title) : "";
+        const details =
+          x.details ? String(x.details) :
+          x.note ? String(x.note) :
+          x.description ? String(x.description) :
+          x.text ? String(x.text) :
+          "";
+
+        if (title && details) return `${sev}${title} — ${details}`.trim();
+        return `${sev}${title || details}`.trim();
+      }
+
+      return "";
+    })
+    .filter(Boolean);
+}
+
+
 const LS_PATCHED_PREFIX = "cipher:patched:";
 const LS_MODE_PREFIX = "cipher:mode:";
 
@@ -96,6 +124,11 @@ export default function AnalysisPage() {
 
   const [status, setStatus] = useState<AnalysisStatus | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
+   const [serverPatches, setServerPatches] = useState<{
+    patchedCount: number;
+    updatedAt: string | null;
+    source: string | null;
+  }>({ patchedCount: 0, updatedAt: null, source: null });
 
   // Explore state
   const [repo, setRepo] = useState<RepoMeta | null>(null);
@@ -181,13 +214,22 @@ export default function AnalysisPage() {
       .filter(Boolean)
       .slice(0, 200);
 
-    await fetch("/api/analysis/patches", {
+    const res = await fetch("/api/analysis/patches", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ analysisId: id, patchedFiles }),
     });
+
+    const data = await safeJson(res);
+    if (res.ok) {
+      setServerPatches({
+        patchedCount: Number(data.patchedCount ?? patchedFiles.length),
+        updatedAt: data.updatedAt ?? null,
+        source: data.source ?? "ui_apply_preview",
+      });
+    }
   } catch {
-    // best-effort: si falla, no rompemos UX
+    // best-effort
   }
 }
 
@@ -205,6 +247,43 @@ export default function AnalysisPage() {
     if (msgTimer.current) window.clearTimeout(msgTimer.current);
     setActionMsg(msg);
     msgTimer.current = window.setTimeout(() => setActionMsg(""), 1600);
+  }
+
+  async function refreshServerPatches() {
+    try {
+      const res = await fetch(`/api/analysis/patches/${id}`, { cache: "no-store" });
+      const data = await safeJson(res);
+      if (res.ok) {
+        setServerPatches({
+          patchedCount: Number(data.patchedCount ?? 0),
+          updatedAt: data.updatedAt ?? null,
+          source: data.source ?? null,
+        });
+      }
+    } catch {
+      // best-effort
+    }
+  }
+
+async function pushServerPatches(nextPatched: Record<string, string>, source: string) {
+    try {
+      const patchedFiles = Object.keys(nextPatched || {})
+        .map((p) => normalizePath(p))
+        .filter(Boolean)
+        .slice(0, 200);
+
+      await fetch(`/api/analysis/patches/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          patchedCount: patchedFiles.length,
+          patchedFiles,
+          source,
+        }),
+      });
+    } catch {
+      // best-effort
+    }
   }
 
   function toggleHighPlus() {
@@ -229,6 +308,13 @@ export default function AnalysisPage() {
     setOpenDepGroupId("");
     if (tab !== "vuln") setDepsOpen(false);
   }, [tab]);
+
+
+// ✅ Load server patch counter once on page load
+useEffect(() => {
+  refreshServerPatches();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [id]);
 
   // Monaco refs
   const editorRef = useRef<any>(null);
@@ -413,6 +499,7 @@ export default function AnalysisPage() {
       if (typeof orig === "string") setCode(orig);
     }
     flashMsg("Cleared all patch previews ✅");
+    void pushServerPatches({}, "ui_reset").then(() => refreshServerPatches());
   }
 
   // Poll analysis status
@@ -517,18 +604,19 @@ export default function AnalysisPage() {
   if (!selected) return;
   const p = normalizePath(selected);
 
-  setPatchedByFile((prev) => {
-    const next = { ...prev };
-    delete next[p];
-    void persistPatchIndexToServer(next);
-    return next;
-  });
+  const next = { ...(patchedByFile || {}) };
+  delete next[p];
 
-  setModeByFile((prev) => ({ ...prev, [p]: "original" }));
-  setViewMode("original");
-  const orig = originalByFile[p];
-  if (typeof orig === "string") setCode(orig);
-  flashMsg("Reverted patch preview ✅");
+  setPatchedByFile(next);
+    setModeByFile((prev) => ({ ...prev, [p]: "original" }));
+    setViewMode("original");
+
+    const orig = originalByFile[p];
+    if (typeof orig === "string") setCode(orig);
+
+    void pushServerPatches(next, "ui_revert").then(() => refreshServerPatches());
+
+    flashMsg("Reverted patch preview ✅");
 }
 
   async function runExplain(mode: "tech" | "eli5") {
@@ -763,6 +851,7 @@ async function exportPatchedZip() {
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 
     flashMsg("Exported patched ZIP ✅");
+    refreshServerPatches();
   } catch (err: any) {
     alert(err?.message ?? "Export failed");
   }
@@ -863,15 +952,14 @@ async function exportPatchedZip() {
   function applyPatchPreview() {
   if (!patch) return;
   const p = normalizePath(patch.file);
+  const nextPatched = { ...(patchedByFile || {}), [p]: patch.updated };
 
-  setPatchedByFile((prev) => {
-    const next = { ...prev, [p]: patch.updated };
-    void persistPatchIndexToServer(next);
-    return next;
-  });
-
+   setPatchedByFile(nextPatched);
   setModeByFile((prev) => ({ ...prev, [p]: "patched" }));
   setOriginalByFile((prev) => (prev[p] ? prev : { ...prev, [p]: patch.original }));
+
+  // ✅ guardar en server (best-effort)
+  void pushServerPatches(nextPatched, "ui_apply_preview").then(() => refreshServerPatches());
 
   closePatchModal();
   setTab("explore");
@@ -1045,6 +1133,13 @@ async function exportPatchedZip() {
   const selectedHasPatch = selected && patchedByFile[normalizePath(selected)];
   const selectedMode = selected ? (modeByFile[normalizePath(selected)] ?? viewMode) : viewMode;
 
+const overviewAny = status?.result as any;
+
+const overviewRisks = normalizeBulletList(overviewAny?.risks ?? overviewAny?.risk);
+const overviewQuickWins = normalizeBulletList(overviewAny?.quickWins ?? overviewAny?.quick_wins);
+const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overviewAny?.next_steps);
+
+
   return (
     <main className="min-h-screen p-6 flex items-start justify-center">
       <Card className="w-full max-w-6xl">
@@ -1065,7 +1160,8 @@ async function exportPatchedZip() {
               <div className="text-sm text-muted-foreground">
                 Vulns <span className="font-medium text-foreground">{vulns.length}</span> • Deps{" "}
                 <span className="font-medium text-foreground">{deps.length}</span> • Debt{" "}
-                <span className="font-medium text-foreground">{debt.length}</span>
+                <span className="font-medium text-foreground">{debt.length}</span> • Patched previews{" "}
+                <span className="font-medium text-foreground">{serverPatches?.patchedCount ?? 0}</span>
               </div>
 
               <div className="flex-1" />
@@ -1155,6 +1251,40 @@ async function exportPatchedZip() {
                       ))}
                     </ul>
                   </div>
+
+                  {overviewRisks.length > 0 && (
+                  <div className="space-y-2">
+                    <h2 className="text-lg font-semibold">Risks</h2>
+                    <ul className="list-disc pl-5 text-sm space-y-1">
+                      {overviewRisks.map((s, i) => (
+                        <li key={i}>{s}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {overviewQuickWins.length > 0 && (
+                  <div className="space-y-2">
+                    <h2 className="text-lg font-semibold">Quick Wins</h2>
+                    <ul className="list-disc pl-5 text-sm space-y-1">
+                      {overviewQuickWins.map((s, i) => (
+                        <li key={i}>{s}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {overviewNextSteps.length > 0 && (
+                  <div className="space-y-2">
+                    <h2 className="text-lg font-semibold">Next Steps</h2>
+                    <ul className="list-disc pl-5 text-sm space-y-1">
+                      {overviewNextSteps.map((s, i) => (
+                        <li key={i}>{s}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 </>
               ) : (
                 <p className="text-sm text-muted-foreground">Overview will appear once the global analysis completes.</p>
