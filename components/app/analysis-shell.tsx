@@ -89,7 +89,7 @@ export function AnalysisShell({
   exportZipEnabled,
   children,
 }: Props) {
-  // ✅ Drawer nav for ALL screen sizes
+  // Drawer nav for ALL screen sizes
   const [navOpen, setNavOpen] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -107,12 +107,17 @@ export function AnalysisShell({
     const items: Array<{ id: string; label: string; onClick?: () => void; enabled: boolean }> = [
       { id: "md", label: "MD", onClick: onExportMd, enabled: typeof onExportMd === "function" },
       { id: "pdf", label: "PDF", onClick: onExportPdf, enabled: typeof onExportPdf === "function" },
-      { id: "zip", label: "ZIP", onClick: onExportZip, enabled: !!exportZipEnabled && typeof onExportZip === "function" },
+      {
+        id: "zip",
+        label: "ZIP",
+        onClick: onExportZip,
+        enabled: !!exportZipEnabled && typeof onExportZip === "function",
+      },
     ];
     return items.filter((x) => x.enabled);
   }, [onExportMd, onExportPdf, onExportZip, exportZipEnabled]);
 
-  // ✅ UX: ESC closes drawer + lock body scroll while open
+  // UX: ESC closes drawer + lock body scroll while open
   useEffect(() => {
     if (!navOpen) return;
 
@@ -138,7 +143,7 @@ export function AnalysisShell({
           {/* Topbar */}
           <header className="sticky top-0 z-40 border-b bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/65">
             <div className="mx-auto w-full max-w-[1300px] px-4 md:px-6 h-14 flex items-center gap-2">
-              {/* ✅ Menu button visible on ALL sizes */}
+              {/* Menu button visible on ALL sizes */}
               <Button
                 variant="ghost"
                 size="icon"
@@ -225,7 +230,10 @@ export function AnalysisShell({
                   <Progress value={progress} className="h-2" />
                 </div>
                 {actionMsg ? (
-                  <div className="hidden md:block text-[11px] text-muted-foreground whitespace-nowrap" aria-live="polite">
+                  <div
+                    className="hidden md:block text-[11px] text-muted-foreground whitespace-nowrap"
+                    aria-live="polite"
+                  >
                     {actionMsg}
                   </div>
                 ) : null}
@@ -236,7 +244,7 @@ export function AnalysisShell({
           {children}
         </div>
 
-        {/* ✅ Drawer navigation (ALL sizes) */}
+        {/* Drawer navigation (ALL sizes) */}
         {navOpen ? (
           <div className="fixed inset-0 z-50">
             <div className="absolute inset-0 bg-black/45" onClick={() => setNavOpen(false)} />
@@ -248,7 +256,13 @@ export function AnalysisShell({
                   <div className="text-[11px] text-muted-foreground leading-none mt-1 truncate">{repoName}</div>
                 </div>
                 <div className="flex-1" />
-                <Button variant="ghost" size="icon" className="h-9 w-9" onClick={() => setNavOpen(false)} title="Close">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-9 w-9"
+                  onClick={() => setNavOpen(false)}
+                  title="Close"
+                >
                   <X className="h-4 w-4" />
                 </Button>
               </div>
@@ -256,7 +270,9 @@ export function AnalysisShell({
               <nav className="h-[calc(100vh-3.5rem)] overflow-auto py-3 px-3">
                 {nav.map((group) => (
                   <div key={group.title}>
-                    <div className="px-2 py-2 text-[11px] uppercase tracking-wide text-muted-foreground">{group.title}</div>
+                    <div className="px-2 py-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+                      {group.title}
+                    </div>
                     <div className="space-y-1">
                       {group.items.map((it) => (
                         <NavButton
@@ -297,7 +313,9 @@ function NavButton({ item, onSelect }: { item: NavItem; onSelect: () => void }) 
       ].join(" ")}
     >
       <Icon className={["h-4 w-4 shrink-0", item.pseudo ? "opacity-70" : ""].join(" ")} />
-      <span className={["text-sm truncate", item.pseudo ? "text-[13px]" : ""].join(" ")}>{item.label}</span>
+      <span className={["text-sm truncate", item.pseudo ? "text-[13px]" : ""].join(" ")}>
+        {item.label}
+      </span>
       <span className="flex-1" />
       {item.badge !== undefined ? (
         <Badge variant={isActive ? "default" : "secondary"} className="h-5 px-2 text-[11px] tabular-nums">

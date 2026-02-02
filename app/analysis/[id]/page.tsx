@@ -550,6 +550,11 @@ export default function AnalysisPage() {
 
   const patchedCount = useMemo(() => Object.keys(patchedByFile || {}).length, [patchedByFile]);
 
+const patchedCountAny = useMemo(
+  () => Math.max(patchedCount, Number(serverPatches?.patchedCount ?? 0)),
+  [patchedCount, serverPatches?.patchedCount]
+);
+
   const filteredFiles = useMemo(() => {
     let files = repo?.files ?? [];
     if (patchedOnly) files = files.filter((f) => !!patchedByFile[normalizePath(f)]);
@@ -822,7 +827,17 @@ export default function AnalysisPage() {
 
   async function exportPatchedZip() {
     try {
-      const patchedFiles = Object.entries(patchedByFile || {})
+            let patchedMap: Record<string, string> = (patchedByFile || {}) as any;
+      if (Object.keys(patchedMap).length === 0) {
+        try {
+          const raw = localStorage.getItem(`${LS_PATCHED_PREFIX}${id}`) || "";
+          if (raw) patchedMap = JSON.parse(raw) as Record<string, string>;
+        } catch {
+          // ignore
+        }
+      }
+
+      const patchedFiles = Object.entries(patchedMap || {})
         .map(([path, content]) => ({
           path: normalizePath(path),
           content: String(content ?? ""),
@@ -1169,7 +1184,7 @@ export default function AnalysisPage() {
         items: [
           { id: "export-md", label: "Export Markdown", icon: ShellIcons.Export, secondary: true, onClick: exportMd },
           { id: "export-pdf", label: "Export PDF", icon: ShellIcons.Export, secondary: true, onClick: exportPdf },
-          ...(patchedCount > 0
+          ...(patchedCountAny > 0
             ? [{ id: "export-zip", label: "Export patched ZIP", icon: ShellIcons.Export, secondary: true, onClick: exportPatchedZip }]
             : []),
         ],
@@ -1177,6 +1192,15 @@ export default function AnalysisPage() {
     ],
     [tab, depsOpen, vulns.length, deps.length, debt.length, patchedCount, exportPatchedZip]
   );
+  const breadcrumbCurrent = useMemo(() => {
+    if (tab === "overview") return "";
+    if (tab === "explore") return "Explore";
+    if (tab === "vuln") return depsOpen ? "Dependency CVEs" : "Vulnerabilities";
+    if (tab === "debt") return "Tech Debt";
+    if (tab === "docs") return "Docs";
+    return "";
+  }, [tab, depsOpen]);
+
 
   // Loading shell
   if (!status) {
@@ -1222,8 +1246,8 @@ export default function AnalysisPage() {
       nav={nav}
       onExportMd={exportMd}
       onExportPdf={exportPdf}
-      onExportZip={patchedCount > 0 ? exportPatchedZip : undefined}
-      exportZipEnabled={patchedCount > 0}
+      onExportZip={patchedCountAny > 0 ? exportPatchedZip : undefined}
+      exportZipEnabled={patchedCountAny > 0}
     >
       <main className="mx-auto w-full max-w-[1300px] px-4 md:px-6 py-6 space-y-6">
         {/* Repo Health summary (premium, scannable) */}
@@ -1274,6 +1298,27 @@ export default function AnalysisPage() {
             ) : null}
           </div>
         </section>
+
+        {tab !== "overview" ? (
+          <div className="px-1">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <button
+                type="button"
+                onClick={() => {
+                  setTab("overview");
+                  setDepsOpen(false);
+                }}
+                className="hover:text-foreground transition"
+              >
+                Overview
+              </button>
+              <span aria-hidden className="opacity-60">
+                {">"}
+              </span>
+              <span className="text-foreground font-medium">{breadcrumbCurrent}</span>
+            </div>
+          </div>
+        ) : null}
 
         {/* Tab content */}
         {tab === "overview" && (
