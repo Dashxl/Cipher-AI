@@ -4,12 +4,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import type { AnalysisStatus } from "@/types/analysis";
 import type { DebtIssue, VulnFinding, Severity, DepCveFinding } from "@/types/scan";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
-import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
+
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
+import { Input } from "@/components/ui/input";
+
 import { MermaidView } from "@/components/app/mermaid-view";
+import { AnalysisShell, ShellIcons } from "@/components/app/analysis-shell";
+
 import Editor, { DiffEditor } from "@monaco-editor/react";
 
 type RepoMeta = { repoName: string; root: string | null; files: string[] };
@@ -100,11 +102,15 @@ function normalizeBulletList(input: any): string[] {
         const sev = x.severity ? `[${String(x.severity)}] ` : "";
         const title = x.title ? String(x.title) : "";
         const details =
-          x.details ? String(x.details) :
-          x.note ? String(x.note) :
-          x.description ? String(x.description) :
-          x.text ? String(x.text) :
-          "";
+          x.details
+            ? String(x.details)
+            : x.note
+              ? String(x.note)
+              : x.description
+                ? String(x.description)
+                : x.text
+                  ? String(x.text)
+                  : "";
 
         if (title && details) return `${sev}${title} — ${details}`.trim();
         return `${sev}${title || details}`.trim();
@@ -115,7 +121,6 @@ function normalizeBulletList(input: any): string[] {
     .filter(Boolean);
 }
 
-
 const LS_PATCHED_PREFIX = "cipher:patched:";
 const LS_MODE_PREFIX = "cipher:mode:";
 
@@ -124,7 +129,7 @@ export default function AnalysisPage() {
 
   const [status, setStatus] = useState<AnalysisStatus | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
-   const [serverPatches, setServerPatches] = useState<{
+  const [serverPatches, setServerPatches] = useState<{
     patchedCount: number;
     updatedAt: string | null;
     source: string | null;
@@ -190,7 +195,7 @@ export default function AnalysisPage() {
   const [doc, setDoc] = useState<FileDoc | null>(null);
   const [docsErr, setDocsErr] = useState<string>("");
 
-  // Patch preview modal
+  // Patch preview modal (in-page)
   const [patchBusyId, setPatchBusyId] = useState<string>("");
   const [patchOpen, setPatchOpen] = useState(false);
   const [patch, setPatch] = useState<PatchPreview | null>(null);
@@ -207,31 +212,33 @@ export default function AnalysisPage() {
   const didLoadPatchedFromLS = useRef(false);
   const savePatchesTimer = useRef<number | null>(null);
 
+  const depsSectionRef = useRef<HTMLDivElement | null>(null);
+
   async function persistPatchIndexToServer(nextPatchedByFile: Record<string, string>) {
-  try {
-    const patchedFiles = Object.keys(nextPatchedByFile || {})
-      .map((p) => normalizePath(p))
-      .filter(Boolean)
-      .slice(0, 200);
+    try {
+      const patchedFiles = Object.keys(nextPatchedByFile || {})
+        .map((p) => normalizePath(p))
+        .filter(Boolean)
+        .slice(0, 200);
 
-    const res = await fetch("/api/analysis/patches", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ analysisId: id, patchedFiles }),
-    });
-
-    const data = await safeJson(res);
-    if (res.ok) {
-      setServerPatches({
-        patchedCount: Number(data.patchedCount ?? patchedFiles.length),
-        updatedAt: data.updatedAt ?? null,
-        source: data.source ?? "ui_apply_preview",
+      const res = await fetch("/api/analysis/patches", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ analysisId: id, patchedFiles }),
       });
+
+      const data = await safeJson(res);
+      if (res.ok) {
+        setServerPatches({
+          patchedCount: Number(data.patchedCount ?? patchedFiles.length),
+          updatedAt: data.updatedAt ?? null,
+          source: data.source ?? "ui_apply_preview",
+        });
+      }
+    } catch {
+      // best-effort
     }
-  } catch {
-    // best-effort
   }
-}
 
   function flashCopy() {
     if (copyTimer.current) window.clearTimeout(copyTimer.current);
@@ -265,7 +272,7 @@ export default function AnalysisPage() {
     }
   }
 
-async function pushServerPatches(nextPatched: Record<string, string>, source: string) {
+  async function pushServerPatches(nextPatched: Record<string, string>, source: string) {
     try {
       const patchedFiles = Object.keys(nextPatched || {})
         .map((p) => normalizePath(p))
@@ -309,12 +316,11 @@ async function pushServerPatches(nextPatched: Record<string, string>, source: st
     if (tab !== "vuln") setDepsOpen(false);
   }, [tab]);
 
-
-// ✅ Load server patch counter once on page load
-useEffect(() => {
-  refreshServerPatches();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [id]);
+  // ✅ Load server patch counter once on page load
+  useEffect(() => {
+    refreshServerPatches();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
 
   // Monaco refs
   const editorRef = useRef<any>(null);
@@ -345,6 +351,14 @@ useEffect(() => {
     setTab("explore");
     setPendingReveal({ file, line: ln, endLine, note });
     openFile(file);
+  }
+
+  function openDepsPseudoItem() {
+    setTab("vuln");
+    setDepsOpen(true);
+    window.setTimeout(() => {
+      depsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 60);
   }
 
   function revealLineInExplore(line: number) {
@@ -435,7 +449,7 @@ useEffect(() => {
     }
   }, [patchedByFile, modeByFile, id]);
 
-    // ✅ Sync patch previews to server (so Export MD/PDF can include them even without exporting ZIP)
+  // ✅ Sync patch previews to server (so Export MD/PDF can include them even without exporting ZIP)
   useEffect(() => {
     if (!id) return;
 
@@ -601,13 +615,13 @@ useEffect(() => {
   }
 
   function revertPatchForSelected() {
-  if (!selected) return;
-  const p = normalizePath(selected);
+    if (!selected) return;
+    const p = normalizePath(selected);
 
-  const next = { ...(patchedByFile || {}) };
-  delete next[p];
+    const next = { ...(patchedByFile || {}) };
+    delete next[p];
 
-  setPatchedByFile(next);
+    setPatchedByFile(next);
     setModeByFile((prev) => ({ ...prev, [p]: "original" }));
     setViewMode("original");
 
@@ -617,7 +631,7 @@ useEffect(() => {
     void pushServerPatches(next, "ui_revert").then(() => refreshServerPatches());
 
     flashMsg("Reverted patch preview ✅");
-}
+  }
 
   async function runExplain(mode: "tech" | "eli5") {
     if (!selected) return;
@@ -703,57 +717,57 @@ useEffect(() => {
   }, [docsIndex, docsQ]);
 
   async function generateDocsIndex() {
-  setDocsIndexBusy(true);
-  setDocsErr("");
+    setDocsIndexBusy(true);
+    setDocsErr("");
 
-  const payload = { analysisId: id, mode: "index", maxFiles: 5 };
+    const payload = { analysisId: id, mode: "index", maxFiles: 5 };
 
-  try {
-    // ✅ retry con backoff si es 429
-    let lastRes: Response | null = null;
-    let lastData: any = null;
+    try {
+      // ✅ retry con backoff si es 429
+      let lastRes: Response | null = null;
+      let lastData: any = null;
 
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const res = await fetch("/api/analysis/docs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const res = await fetch("/api/analysis/docs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
 
-      lastRes = res;
+        lastRes = res;
 
-      if (res.status === 429 && attempt < 2) {
-        // backoff progresivo
-        await sleep(attempt === 0 ? 700 : 1500);
-        continue;
-      }
+        if (res.status === 429 && attempt < 2) {
+          // backoff progresivo
+          await sleep(attempt === 0 ? 700 : 1500);
+          continue;
+        }
 
-      const data = await safeJson(res);
-      lastData = data;
+        const data = await safeJson(res);
+        lastData = data;
 
-      if (!res.ok) {
-        const msg = friendlyError(res, data);
-        setDocsErr(msg);
-        flashMsg("Docs index failed ❌");
+        if (!res.ok) {
+          const msg = friendlyError(res, data);
+          setDocsErr(msg);
+          flashMsg("Docs index failed ❌");
+          return;
+        }
+
+        setDocsIndex(Array.isArray(data.items) ? data.items : []);
+        flashMsg("Docs index ready ✅");
         return;
       }
 
-      setDocsIndex(Array.isArray(data.items) ? data.items : []);
-      flashMsg("Docs index ready ✅");
-      return;
+      // si llegó aquí, falló por 429 múltiples veces
+      if (lastRes) {
+        const msg = lastData ? friendlyError(lastRes, lastData) : "Rate limit de Gemini. Intenta en 30–60s.";
+        setDocsErr(msg);
+      } else {
+        setDocsErr("Docs index failed.");
+      }
+    } finally {
+      setDocsIndexBusy(false);
     }
-
-    // si llegó aquí, falló por 429 múltiples veces
-    if (lastRes) {
-      const msg = lastData ? friendlyError(lastRes, lastData) : "Rate limit de Gemini. Intenta en 30–60s.";
-      setDocsErr(msg);
-    } else {
-      setDocsErr("Docs index failed.");
-    }
-  } finally {
-    setDocsIndexBusy(false);
   }
-}
 
   async function openDoc(path: string) {
     setDocSelected(path);
@@ -797,65 +811,65 @@ useEffect(() => {
   }
 
   function filenameFromContentDisposition(cd: string | null) {
-  if (!cd) return "";
-  // filename="x.zip" OR filename*=UTF-8''x.zip
-  const mStar = cd.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
-  if (mStar?.[1]) return decodeURIComponent(mStar[1]).replace(/["']/g, "").trim();
+    if (!cd) return "";
+    // filename="x.zip" OR filename*=UTF-8''x.zip
+    const mStar = cd.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+    if (mStar?.[1]) return decodeURIComponent(mStar[1]).replace(/["']/g, "").trim();
 
-  const m = cd.match(/filename\s*=\s*("?)([^"]+)\1/i);
-  return m?.[2]?.trim() ?? "";
-}
-
-async function exportPatchedZip() {
-  try {
-    const patchedFiles = Object.entries(patchedByFile || {})
-      .map(([path, content]) => ({
-        path: normalizePath(path),
-        content: String(content ?? ""),
-      }))
-      .filter((f) => f.path && f.content.trim().length > 0)
-      .slice(0, 200);
-
-    if (patchedFiles.length === 0) {
-      flashMsg("No patched previews to export.");
-      return;
-    }
-
-    const res = await fetch("/api/analysis/export/zip", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ analysisId: id, patchedFiles }),
-    });
-
-    if (!res.ok) {
-      // en error sí intentamos JSON
-      const data = await safeJson(res);
-      alert(data.error ?? `Export failed (${res.status})`);
-      return;
-    }
-
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-
-    const cd = res.headers.get("Content-Disposition");
-    const headerName = filenameFromContentDisposition(cd);
-
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = headerName || `cipherai-${id}-patched.zip`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-
-    // revoke un poco después para evitar descargas truncadas en algunos browsers
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-
-    flashMsg("Exported patched ZIP ✅");
-    refreshServerPatches();
-  } catch (err: any) {
-    alert(err?.message ?? "Export failed");
+    const m = cd.match(/filename\s*=\s*("?)([^"]+)\1/i);
+    return m?.[2]?.trim() ?? "";
   }
-}
+
+  async function exportPatchedZip() {
+    try {
+      const patchedFiles = Object.entries(patchedByFile || {})
+        .map(([path, content]) => ({
+          path: normalizePath(path),
+          content: String(content ?? ""),
+        }))
+        .filter((f) => f.path && f.content.trim().length > 0)
+        .slice(0, 200);
+
+      if (patchedFiles.length === 0) {
+        flashMsg("No patched previews to export.");
+        return;
+      }
+
+      const res = await fetch("/api/analysis/export/zip", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ analysisId: id, patchedFiles }),
+      });
+
+      if (!res.ok) {
+        // en error sí intentamos JSON
+        const data = await safeJson(res);
+        alert(data.error ?? `Export failed (${res.status})`);
+        return;
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+
+      const cd = res.headers.get("Content-Disposition");
+      const headerName = filenameFromContentDisposition(cd);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = headerName || `cipherai-${id}-patched.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+
+      // revoke un poco después para evitar descargas truncadas en algunos browsers
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+      flashMsg("Exported patched ZIP ✅");
+      refreshServerPatches();
+    } catch (err: any) {
+      alert(err?.message ?? "Export failed");
+    }
+  }
 
   // ✅ Smart unified diff
   function buildSmartDiff(file: string, oldText: string, newText: string) {
@@ -867,13 +881,7 @@ async function exportPatchedZip() {
     }
   }
 
-  async function generatePatch(
-    file: string,
-    issueTitle: string,
-    issueDetails: string,
-    idForBusy: string,
-    targetLine?: number
-  ) {
+  async function generatePatch(file: string, issueTitle: string, issueDetails: string, idForBusy: string, targetLine?: number) {
     setPatchBusyId(idForBusy);
     try {
       const res = await fetch("/api/analysis/patch", {
@@ -950,27 +958,27 @@ async function exportPatchedZip() {
 
   // ✅ Apply patch preview (persist)
   function applyPatchPreview() {
-  if (!patch) return;
-  const p = normalizePath(patch.file);
-  const nextPatched = { ...(patchedByFile || {}), [p]: patch.updated };
+    if (!patch) return;
+    const p = normalizePath(patch.file);
+    const nextPatched = { ...(patchedByFile || {}), [p]: patch.updated };
 
-   setPatchedByFile(nextPatched);
-  setModeByFile((prev) => ({ ...prev, [p]: "patched" }));
-  setOriginalByFile((prev) => (prev[p] ? prev : { ...prev, [p]: patch.original }));
+    setPatchedByFile(nextPatched);
+    setModeByFile((prev) => ({ ...prev, [p]: "patched" }));
+    setOriginalByFile((prev) => (prev[p] ? prev : { ...prev, [p]: patch.original }));
 
-  // ✅ guardar en server (best-effort)
-  void pushServerPatches(nextPatched, "ui_apply_preview").then(() => refreshServerPatches());
+    // ✅ guardar en server (best-effort)
+    void pushServerPatches(nextPatched, "ui_apply_preview").then(() => refreshServerPatches());
 
-  closePatchModal();
-  setTab("explore");
-  setSelected(p);
-  setExplain("");
-  setViewMode("patched");
-  setCode(patch.updated);
+    closePatchModal();
+    setTab("explore");
+    setSelected(p);
+    setExplain("");
+    setViewMode("patched");
+    setCode(patch.updated);
 
-  flashMsg("Applied patch preview ✅");
-  if (patch.targetLine) setPendingReveal({ file: p, line: patch.targetLine });
-}
+    flashMsg("Applied patch preview ✅");
+    if (patch.targetLine) setPendingReveal({ file: p, line: patch.targetLine });
+  }
 
   // counts
   const vulnCountsAll = useMemo(() => countBySeverity(vulns), [vulns]);
@@ -978,11 +986,7 @@ async function exportPatchedZip() {
   const depsCountsAll = useMemo(() => countBySeverity(deps), [deps]);
 
   const repoCountsAll = useMemo(() => {
-    const combined = [
-      ...vulns.map((x) => ({ severity: x.severity })),
-      ...debt.map((x) => ({ severity: x.severity })),
-      ...deps.map((x) => ({ severity: x.severity })),
-    ];
+    const combined = [...vulns.map((x) => ({ severity: x.severity })), ...debt.map((x) => ({ severity: x.severity })), ...deps.map((x) => ({ severity: x.severity }))];
     return countBySeverity(combined);
   }, [vulns, debt, deps]);
 
@@ -1105,9 +1109,7 @@ async function exportPatchedZip() {
       .filter((g) => (depsFilter === "ALL" ? true : g.maxSeverity === depsFilter))
       .filter((g) => {
         if (!s) return true;
-        const hay = `${g.name} ${g.version} ${g.ecosystem} ${g.findings
-          .map((x) => `${x.vulnId} ${x.summary}`)
-          .join(" ")}`.toLowerCase();
+        const hay = `${g.name} ${g.version} ${g.ecosystem} ${g.findings.map((x) => `${x.vulnId} ${x.summary}`).join(" ")}`.toLowerCase();
         return hay.includes(s);
       });
 
@@ -1121,207 +1123,288 @@ async function exportPatchedZip() {
       .filter((g) => (depsFilter === "ALL" ? true : g.maxSeverity === depsFilter))
       .filter((g) => {
         if (!s) return true;
-        const hay = `${g.name} ${g.version} ${g.ecosystem} ${g.findings
-          .map((x) => `${x.vulnId} ${x.summary}`)
-          .join(" ")}`.toLowerCase();
+        const hay = `${g.name} ${g.version} ${g.ecosystem} ${g.findings.map((x) => `${x.vulnId} ${x.summary}`).join(" ")}`.toLowerCase();
         return hay.includes(s);
       }).length;
   }, [depGroupsAll, depsSearch, depsFilter, highPlusOnly]);
 
-  if (!status) return <main className="p-6">Loading…</main>;
-
   const selectedHasPatch = selected && patchedByFile[normalizePath(selected)];
   const selectedMode = selected ? (modeByFile[normalizePath(selected)] ?? viewMode) : viewMode;
 
-const overviewAny = status?.result as any;
+  const overviewAny = status?.result as any;
+  const overviewRisks = normalizeBulletList(overviewAny?.risks ?? overviewAny?.risk);
+  const overviewQuickWins = normalizeBulletList(overviewAny?.quickWins ?? overviewAny?.quick_wins);
+  const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overviewAny?.next_steps);
 
-const overviewRisks = normalizeBulletList(overviewAny?.risks ?? overviewAny?.risk);
-const overviewQuickWins = normalizeBulletList(overviewAny?.quickWins ?? overviewAny?.quick_wins);
-const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overviewAny?.next_steps);
+  const nav = useMemo(
+    () => [
+      {
+        title: "Analysis",
+        items: [
+          { id: "overview", label: "Overview", icon: ShellIcons.Overview, active: tab === "overview", onClick: () => setTab("overview") },
+        ],
+      },
+      {
+        title: "Explore",
+        items: [
+          { id: "explore", label: "Explore", icon: ShellIcons.Explore, active: tab === "explore", onClick: () => setTab("explore") },
+        ],
+      },
+      {
+        title: "Scans",
+        items: [
+          { id: "vuln", label: "Vulnerabilities", icon: ShellIcons.Vuln, badge: vulns.length, active: tab === "vuln" && !depsOpen, onClick: () => { setTab("vuln"); setDepsOpen(false); } },
+          { id: "deps", label: "Dependency CVEs", icon: ShellIcons.Deps, badge: deps.length, active: tab === "vuln" && depsOpen, onClick: openDepsPseudoItem },
+          { id: "debt", label: "Tech Debt", icon: ShellIcons.Debt, badge: debt.length, active: tab === "debt", onClick: () => setTab("debt") },
+        ],
+      },
+      {
+        title: "Docs",
+        items: [
+          { id: "docs", label: "Docs", icon: ShellIcons.Docs, active: tab === "docs", onClick: () => setTab("docs") },
+        ],
+      },
+      {
+        title: "Export",
+        items: [
+          { id: "export-md", label: "Export Markdown", icon: ShellIcons.Export, secondary: true, onClick: exportMd },
+          { id: "export-pdf", label: "Export PDF", icon: ShellIcons.Export, secondary: true, onClick: exportPdf },
+          ...(patchedCount > 0
+            ? [{ id: "export-zip", label: "Export patched ZIP", icon: ShellIcons.Export, secondary: true, onClick: exportPatchedZip }]
+            : []),
+        ],
+      },
+    ],
+    [tab, depsOpen, vulns.length, deps.length, debt.length, patchedCount, exportPatchedZip]
+  );
 
+  // Loading shell
+  if (!status) {
+    return (
+      <AnalysisShell
+        repoName={"Repository"}
+        analysisId={id}
+        stage={"loading"}
+        message={"Loading analysis…"}
+        progress={30}
+        highPlusOnly={false}
+        highPlusTotal={0}
+        onToggleHighPlus={() => {}}
+        nav={nav}
+        onExportMd={() => {}}
+        onExportPdf={() => {}}
+      >
+        <div className="mx-auto w-full max-w-[1300px] px-4 md:px-6 py-8">
+          <div className="rounded-2xl border bg-card/70 p-5">
+            <div className="text-sm text-muted-foreground">Loading…</div>
+            <div className="mt-3">
+              <Progress value={35} />
+            </div>
+          </div>
+        </div>
+      </AnalysisShell>
+    );
+  }
+
+  const repoName = repo?.repoName ?? "Repository";
 
   return (
-    <main className="min-h-screen p-6 flex items-start justify-center">
-      <Card className="w-full max-w-6xl">
-        <CardHeader className="space-y-3">
-          <CardTitle>Analysis</CardTitle>
-
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary">{status.stage}</Badge>
-            <span className="text-sm text-muted-foreground">{status.message}</span>
-          </div>
-
-          <Progress value={status.progress} />
-
-          {/* Repo-level overview bar */}
-          <div className="rounded-md border bg-muted/10 p-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="text-sm font-medium">Repo Health</div>
-              <div className="text-sm text-muted-foreground">
-                Vulns <span className="font-medium text-foreground">{vulns.length}</span> • Deps{" "}
-                <span className="font-medium text-foreground">{deps.length}</span> • Debt{" "}
-                <span className="font-medium text-foreground">{debt.length}</span> • Patched previews{" "}
-                <span className="font-medium text-foreground">{serverPatches?.patchedCount ?? 0}</span>
+    <AnalysisShell
+      repoName={repoName}
+      analysisId={id}
+      stage={status.stage}
+      message={status.message}
+      progress={status.progress}
+      highPlusOnly={highPlusOnly}
+      highPlusTotal={repoHighPlusTotal}
+      onToggleHighPlus={toggleHighPlus}
+      actionMsg={actionMsg}
+      nav={nav}
+      onExportMd={exportMd}
+      onExportPdf={exportPdf}
+      onExportZip={patchedCount > 0 ? exportPatchedZip : undefined}
+      exportZipEnabled={patchedCount > 0}
+    >
+      <main className="mx-auto w-full max-w-[1300px] px-4 md:px-6 py-6 space-y-6">
+        {/* Repo Health summary (premium, scannable) */}
+        <section className="rounded-2xl border bg-card/70 shadow-sm">
+          <div className="p-4 md:p-5">
+            <div className="flex flex-wrap items-start gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold">Repo Health</div>
+                <div className="text-xs text-muted-foreground mt-1">
+                  Vulns <span className="font-medium text-foreground">{vulns.length}</span> • Deps{" "}
+                  <span className="font-medium text-foreground">{deps.length}</span> • Debt{" "}
+                  <span className="font-medium text-foreground">{debt.length}</span> • Patched previews{" "}
+                  <span className="font-medium text-foreground">{serverPatches?.patchedCount ?? 0}</span>
+                  {serverPatches?.updatedAt ? (
+                    <span className="text-muted-foreground"> • updated {serverPatches.updatedAt}</span>
+                  ) : null}
+                </div>
               </div>
 
               <div className="flex-1" />
 
-              <Button
-                size="sm"
-                variant={highPlusOnly ? "default" : "secondary"}
-                onClick={toggleHighPlus}
-                className="h-8"
-                title="Filter Vulns/Deps/Debt to CRITICAL + HIGH only"
-              >
-                {highPlusOnly ? "High+ only ✓" : "Show only High+"}
-                <span className="ml-2 text-xs opacity-80">{repoHighPlusTotal}</span>
-              </Button>
+              {highPlusOnly ? (
+                <div className="text-xs rounded-full px-3 py-1 border bg-muted/40">
+                  High+ filter active
+                </div>
+              ) : null}
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 pt-2">
-              <SeverityPill s="CRITICAL" n={repoCountsAll.CRITICAL} />
-              <SeverityPill s="HIGH" n={repoCountsAll.HIGH} />
-              <SeverityPill s="MEDIUM" n={repoCountsAll.MEDIUM} />
-              <SeverityPill s="LOW" n={repoCountsAll.LOW} />
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <SeverityChip s="CRITICAL" n={repoCountsAll.CRITICAL} />
+              <SeverityChip s="HIGH" n={repoCountsAll.HIGH} />
+              <SeverityChip s="MEDIUM" n={repoCountsAll.MEDIUM} />
+              <SeverityChip s="LOW" n={repoCountsAll.LOW} />
 
               <div className="flex-1" />
 
-              {actionMsg && (
-                <div className="text-xs text-muted-foreground" aria-live="polite">
-                  {actionMsg}
-                </div>
-              )}
+              {patchedCount > 0 ? (
+                <Button size="sm" variant="secondary" className="h-8" onClick={clearAllPreviews}>
+                  Reset previews
+                </Button>
+              ) : null}
             </div>
+
+            {status.error ? (
+              <pre className="mt-4 whitespace-pre-wrap text-sm p-4 rounded-2xl border border-red-500/40 bg-red-500/5">
+                {status.error}
+              </pre>
+            ) : null}
           </div>
+        </section>
 
-          <div className="flex flex-wrap items-center gap-2 pt-1">
-            <Button variant={tab === "overview" ? "default" : "secondary"} onClick={() => setTab("overview")}>
-              Overview
-            </Button>
-            <Button variant={tab === "explore" ? "default" : "secondary"} onClick={() => setTab("explore")}>
-              Explore
-            </Button>
-            <Button variant={tab === "vuln" ? "default" : "secondary"} onClick={() => setTab("vuln")}>
-              Vulnerabilities
-            </Button>
-            <Button variant={tab === "debt" ? "default" : "secondary"} onClick={() => setTab("debt")}>
-              Tech Debt
-            </Button>
+        {/* Tab content */}
+        {tab === "overview" && (
+          <section className="space-y-6">
+            {status.result ? (
+              <>
+                <div className="rounded-2xl border bg-card/70 shadow-sm">
+                  <div className="p-4 md:p-5 flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold">Architecture Diagram</div>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        Mermaid architecture preview (expand later).
+                      </div>
+                    </div>
 
-            {/* ✅ NEW: Docs tab (Priority C) */}
-            <Button variant={tab === "docs" ? "default" : "secondary"} onClick={() => setTab("docs")}>
-              Docs
-            </Button>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="h-8"
+                        onClick={async () => {
+                          await copyToClipboard(String(status.result?.mermaid ?? ""));
+                          flashMsg("Copied mermaid ✅");
+                        }}
+                      >
+                        Copy mermaid
+                      </Button>
+                    </div>
+                  </div>
 
-            <div className="flex-1" />
-
-            <Button variant="secondary" onClick={exportMd}>
-              Export Markdown
-            </Button>
-            <Button variant="secondary" onClick={exportPdf}>
-              Export PDF
-            </Button>
-            {patchedCount > 0 && (
-              <Button onClick={exportPatchedZip} title="Download a ZIP with your applied previews">
-                Export patched ZIP
-              </Button>
-            )}
-          </div>
-        </CardHeader>
-
-        <CardContent className="space-y-6">
-          {status.error && (
-            <pre className="whitespace-pre-wrap text-sm p-4 rounded-md border border-red-500/40">{status.error}</pre>
-          )}
-
-          {tab === "overview" && (
-            <>
-              {status.result ? (
-                <>
-                  <div className="space-y-2">
-                    <h2 className="text-lg font-semibold">Architecture Diagram</h2>
+                  <div className="px-4 md:px-5 pb-5">
                     <MermaidView chart={status.result.mermaid} />
                   </div>
-
-                  <div className="space-y-2">
-                    <h2 className="text-lg font-semibold">Summary</h2>
-                    <ul className="list-disc pl-5 text-sm space-y-1">
-                      {status.result.summary.map((s, i) => (
-                        <li key={i}>{s}</li>
-                      ))}
-                    </ul>
-                  </div>
-
-                  {overviewRisks.length > 0 && (
-                  <div className="space-y-2">
-                    <h2 className="text-lg font-semibold">Risks</h2>
-                    <ul className="list-disc pl-5 text-sm space-y-1">
-                      {overviewRisks.map((s, i) => (
-                        <li key={i}>{s}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {overviewQuickWins.length > 0 && (
-                  <div className="space-y-2">
-                    <h2 className="text-lg font-semibold">Quick Wins</h2>
-                    <ul className="list-disc pl-5 text-sm space-y-1">
-                      {overviewQuickWins.map((s, i) => (
-                        <li key={i}>{s}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {overviewNextSteps.length > 0 && (
-                  <div className="space-y-2">
-                    <h2 className="text-lg font-semibold">Next Steps</h2>
-                    <ul className="list-disc pl-5 text-sm space-y-1">
-                      {overviewNextSteps.map((s, i) => (
-                        <li key={i}>{s}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                </>
-              ) : (
-                <p className="text-sm text-muted-foreground">Overview will appear once the global analysis completes.</p>
-              )}
-            </>
-          )}
-
-          {tab === "explore" && (
-            <div className="grid gap-4 md:grid-cols-[320px_1fr]">
-              <div className="space-y-3">
-                <div className="text-sm text-muted-foreground">
-                  Repo: <span className="font-medium text-foreground">{repo?.repoName ?? "Loading…"}</span>
                 </div>
 
-                {/* ✅ demo-killer controls */}
-                <div className="flex flex-wrap gap-2 items-center">
-                  <Button
-                    size="sm"
-                    variant={patchedOnly ? "default" : "secondary"}
-                    onClick={() => setPatchedOnly((v) => !v)}
-                    className="h-8"
-                    title="Show only files with patch preview applied"
-                  >
-                    Patched only
-                    <span className="ml-2 text-xs opacity-80">{patchedCount}</span>
-                  </Button>
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="rounded-2xl border bg-card/70 shadow-sm">
+                    <div className="p-4 md:p-5">
+                      <div className="text-sm font-semibold">Summary</div>
+                      <ul className="mt-3 list-disc pl-5 text-sm space-y-1 text-muted-foreground">
+                        {(status.result.summary ?? []).map((s: string, i: number) => (
+                          <li key={i}>{s}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
 
-                  {patchedCount > 0 && (
-                    <Button size="sm" variant="secondary" onClick={clearAllPreviews} className="h-8">
-                      Reset previews
+                  <div className="rounded-2xl border bg-card/70 shadow-sm">
+                    <div className="p-4 md:p-5">
+                      <div className="text-sm font-semibold">Quick Wins</div>
+                      {overviewQuickWins.length > 0 ? (
+                        <ul className="mt-3 list-disc pl-5 text-sm space-y-1 text-muted-foreground">
+                          {overviewQuickWins.map((s, i) => (
+                            <li key={i}>{s}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="mt-3 text-sm text-muted-foreground">No quick wins listed.</div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border bg-card/70 shadow-sm">
+                    <div className="p-4 md:p-5">
+                      <div className="text-sm font-semibold">Risks</div>
+                      {overviewRisks.length > 0 ? (
+                        <ul className="mt-3 list-disc pl-5 text-sm space-y-1 text-muted-foreground">
+                          {overviewRisks.map((s, i) => (
+                            <li key={i}>{s}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="mt-3 text-sm text-muted-foreground">No risks listed.</div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border bg-card/70 shadow-sm">
+                    <div className="p-4 md:p-5">
+                      <div className="text-sm font-semibold">Next Steps</div>
+                      {overviewNextSteps.length > 0 ? (
+                        <ul className="mt-3 list-disc pl-5 text-sm space-y-1 text-muted-foreground">
+                          {overviewNextSteps.map((s, i) => (
+                            <li key={i}>{s}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="mt-3 text-sm text-muted-foreground">No next steps listed.</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="rounded-2xl border bg-card/70 p-5 text-sm text-muted-foreground">
+                Overview will appear once the global analysis completes.
+              </div>
+            )}
+          </section>
+        )}
+
+        {tab === "explore" && (
+          <section className="grid gap-4 md:grid-cols-[340px_1fr]">
+            {/* File list */}
+            <div className="rounded-2xl border bg-card/70 shadow-sm">
+              <div className="p-4 md:p-5 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold">Files</div>
+                    <div className="text-xs text-muted-foreground truncate">
+                      Repo: <span className="font-medium text-foreground">{repo?.repoName ?? "Loading…"}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant={patchedOnly ? "default" : "secondary"}
+                      onClick={() => setPatchedOnly((v) => !v)}
+                      className="h-8"
+                      title="Show only files with patch preview applied"
+                    >
+                      Patched
+                      <span className="ml-2 text-xs opacity-80">{patchedCount}</span>
                     </Button>
-                  )}
+                  </div>
                 </div>
 
                 <Input placeholder="Search files…" value={q} onChange={(e) => setQ(e.target.value)} />
 
-                <div className="h-[520px] overflow-auto rounded-md border">
+                <div className="h-[38vh] md:h-[520px] overflow-auto rounded-xl border bg-background/50">
                   {!repo && <div className="p-3 text-sm text-muted-foreground">Loading file list…</div>}
 
                   {filteredFiles.map((f) => {
@@ -1333,65 +1416,69 @@ const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overview
                       <button
                         key={f}
                         onClick={() => openFile(f)}
-                        className={`w-full text-left text-sm px-3 py-2 border-b hover:bg-muted/30 flex items-center gap-2 ${
-                          isSelected ? "bg-muted/40" : ""
-                        }`}
+                        className={[
+                          "w-full text-left text-sm px-3 py-2 border-b hover:bg-muted/30 flex items-center gap-2",
+                          isSelected ? "bg-muted/40" : "",
+                        ].join(" ")}
                       >
                         <span className="flex-1 min-w-0 truncate">{f}</span>
-                        {isPatched && (
-                          <Badge variant="secondary" title="Patch preview applied">
+                        {isPatched ? (
+                          <span className="text-xs rounded-full px-2 py-0.5 border bg-muted/30" title="Patch preview applied">
                             P
-                          </Badge>
-                        )}
+                          </span>
+                        ) : null}
                       </button>
                     );
                   })}
 
-                  {repo && filteredFiles.length === 0 && (
+                  {repo && filteredFiles.length === 0 ? (
                     <div className="p-3 text-sm text-muted-foreground">No files match that search.</div>
-                  )}
+                  ) : null}
                 </div>
-              </div>
 
-              <div className="space-y-3">
+                {patchedCount > 0 ? (
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="secondary" onClick={clearAllPreviews} className="h-8">
+                      Reset previews
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            {/* Viewer */}
+            <div className="rounded-2xl border bg-card/70 shadow-sm">
+              <div className="p-4 md:p-5 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="text-sm text-muted-foreground truncate min-w-0">
+                  <div className="text-xs text-muted-foreground truncate min-w-0">
                     {selected ? selected : "Select a file to view"}
                   </div>
 
                   <div className="flex flex-wrap gap-2 items-center">
-                    {selected && selectedHasPatch && (
-                      <div className="flex items-center gap-2">
-                        <Badge variant={selectedMode === "patched" ? "default" : "secondary"}>
-                          {selectedMode === "patched" ? "PATCHED (preview)" : "Original"}
-                        </Badge>
+                    {selected && selectedHasPatch ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="text-xs rounded-full px-3 py-1 border bg-muted/30">
+                          {selectedMode === "patched" ? "PATCHED (preview)" : "ORIGINAL"}
+                        </div>
 
                         <div className="flex items-center gap-1">
-                          <Button
-                            size="sm"
-                            variant={selectedMode === "original" ? "default" : "secondary"}
-                            onClick={() => setExploreMode("original")}
-                          >
+                          <Button size="sm" className="h-8" variant={selectedMode === "original" ? "default" : "secondary"} onClick={() => setExploreMode("original")}>
                             Original
                           </Button>
-                          <Button
-                            size="sm"
-                            variant={selectedMode === "patched" ? "default" : "secondary"}
-                            onClick={() => setExploreMode("patched")}
-                          >
+                          <Button size="sm" className="h-8" variant={selectedMode === "patched" ? "default" : "secondary"} onClick={() => setExploreMode("patched")}>
                             Patched
                           </Button>
                         </div>
 
-                        <Button size="sm" variant="secondary" onClick={revertPatchForSelected}>
+                        <Button size="sm" className="h-8" variant="secondary" onClick={revertPatchForSelected}>
                           Revert
                         </Button>
                       </div>
-                    )}
+                    ) : null}
 
                     <div className="flex items-center gap-2">
                       <Input
-                        className="w-[130px]"
+                        className="w-[130px] h-8"
                         placeholder="Go to line…"
                         value={goLine}
                         onChange={(e) => setGoLine(e.target.value)}
@@ -1404,6 +1491,8 @@ const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overview
                         disabled={!selected}
                       />
                       <Button
+                        size="sm"
+                        className="h-8"
                         variant="secondary"
                         disabled={!selected}
                         onClick={() => {
@@ -1415,20 +1504,20 @@ const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overview
                       </Button>
                     </div>
 
-                    <Button variant="secondary" disabled={!selected || busyExplain} onClick={() => runExplain("tech")}>
+                    <Button size="sm" className="h-8" variant="secondary" disabled={!selected || busyExplain} onClick={() => runExplain("tech")}>
                       Explain
                     </Button>
-                    <Button variant="secondary" disabled={!selected || busyExplain} onClick={() => runExplain("eli5")}>
+                    <Button size="sm" className="h-8" variant="secondary" disabled={!selected || busyExplain} onClick={() => runExplain("eli5")}>
                       ELI5
                     </Button>
                   </div>
                 </div>
 
-                <div className="rounded-md border overflow-hidden">
+                <div className="rounded-2xl border overflow-hidden bg-background/50">
                   <Editor
                     height="420px"
                     language={guessLanguage(selected)}
-                    value={code}
+                    value={fileLoading ? "Loading…" : code}
                     onMount={(editor, monaco) => {
                       editorRef.current = editor;
                       monacoRef.current = monaco;
@@ -1442,127 +1531,143 @@ const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overview
                   />
                 </div>
 
-                {explain && <pre className="whitespace-pre-wrap text-sm p-4 rounded-md border bg-muted/20">{explain}</pre>}
-              </div>
-            </div>
-          )}
-
-          {tab === "vuln" && (
-            <div className="space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="text-lg font-semibold">Vulnerabilities</h2>
-                <Button onClick={runVulnScan} disabled={vulnBusy}>
-                  {vulnBusy ? "Scanning…" : "Run scan"}
-                </Button>
-              </div>
-
-              {/* ✅ PRIORIDAD B UI: Dependency CVEs agrupado por paquete */}
-              <div className="rounded-md border overflow-hidden">
-                <button
-                  className="w-full text-left p-3 hover:bg-muted/20 transition"
-                  onClick={() => setDepsOpen((v) => !v)}
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className={`cipher-chevron ${depsOpen ? "open" : ""}`} aria-hidden />
-                    <div className="font-medium">Dependency CVEs (OSV)</div>
-                    <div className="text-sm text-muted-foreground">
-                      {deps.length === 0 ? "0 findings" : `${deps.length} findings`}
-                      {highPlusOnly ? " • (High+ filter active)" : ""}
-                    </div>
-                    <div className="flex-1" />
-                    <Badge variant="secondary">{depsOpen ? "Hide" : "Show"}</Badge>
-                  </div>
-                  {!!depsNote && !depsOpen && (
-                    <div className="text-xs text-muted-foreground mt-1 truncate">{depsNote}</div>
-                  )}
-                </button>
-
-                {depsOpen && (
-                  <div className="border-t p-3 space-y-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="text-sm text-muted-foreground">
-                        Scans pinned deps from package-lock/yarn.lock/pnpm-lock + requirements/poetry/pyproject
-                      </div>
-                      <Button variant="secondary" onClick={runDepsScan} disabled={depsBusy}>
-                        {depsBusy ? "Scanning…" : "Scan dependencies"}
+                {explain ? (
+                  <div className="rounded-2xl border bg-muted/10 p-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-sm font-semibold">Explanation</div>
+                      <Button
+                        size="sm"
+                        className="h-8"
+                        variant="secondary"
+                        onClick={async () => {
+                          await copyToClipboard(explain);
+                          flashCopy();
+                          flashMsg("Copied explanation ✅");
+                        }}
+                      >
+                        Copy
                       </Button>
                     </div>
+                    <pre className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{explain}</pre>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </section>
+        )}
 
-                    <div className="border rounded-md p-2">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <SeverityFilter value={depsFilter} onChange={setDepsFilter} counts={depsCountsAll} total={deps.length} />
-                        <div className="flex-1" />
-                        <Input
-                          className="w-[260px]"
-                          placeholder="Search dependency findings…"
-                          value={depsSearch}
-                          onChange={(e) => setDepsSearch(e.target.value)}
-                        />
-                        <Button variant="secondary" onClick={() => setDepsShowAll((v) => !v)}>
-                          {depsShowAll ? "Show 30" : "Show all"}
-                          <span className="ml-2 text-xs opacity-80">{totalDepsGroupsAfterFilter}</span>
-                        </Button>
-                      </div>
+        {tab === "vuln" && (
+          <section className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-sm font-semibold">Vulnerabilities</div>
+                <div className="text-xs text-muted-foreground mt-1">
+                  Findings with location, snippet, recommendation + patch generator.
+                </div>
+              </div>
+              <Button onClick={runVulnScan} disabled={vulnBusy} className="h-9">
+                {vulnBusy ? "Scanning…" : "Run scan"}
+              </Button>
+            </div>
+
+            {/* ✅ Dependency CVEs (pseudo-item target) */}
+            <div ref={depsSectionRef} className="rounded-2xl border bg-card/70 shadow-sm overflow-hidden">
+              <button className="w-full text-left p-4 hover:bg-muted/20 transition" onClick={() => setDepsOpen((v) => !v)}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`cipher-chevron ${depsOpen ? "open" : ""}`} aria-hidden />
+                  <div className="font-semibold">Dependency CVEs (OSV)</div>
+                  <div className="text-sm text-muted-foreground">
+                    {deps.length === 0 ? "0 findings" : `${deps.length} findings`}
+                    {highPlusOnly ? " • (High+ filter active)" : ""}
+                  </div>
+                  <div className="flex-1" />
+                  <div className="text-xs rounded-full px-3 py-1 border bg-muted/30">{depsOpen ? "Hide" : "Show"}</div>
+                </div>
+                {!!depsNote && !depsOpen ? <div className="text-xs text-muted-foreground mt-1 truncate">{depsNote}</div> : null}
+              </button>
+
+              {depsOpen ? (
+                <div className="border-t p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-sm text-muted-foreground">
+                      Scans pinned deps from package-lock/yarn.lock/pnpm-lock + requirements/poetry/pyproject
                     </div>
+                    <Button variant="secondary" onClick={runDepsScan} disabled={depsBusy} className="h-9">
+                      {depsBusy ? "Scanning…" : "Scan dependencies"}
+                    </Button>
+                  </div>
 
-                    {depsNote && <div className="text-sm text-muted-foreground border rounded-md p-3">{depsNote}</div>}
+                  <div className="rounded-2xl border bg-background/50 p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <SeverityFilter value={depsFilter} onChange={setDepsFilter} counts={depsCountsAll} total={deps.length} />
+                      <div className="flex-1" />
+                      <Input className="w-full sm:w-[320px]" placeholder="Search dependency findings…" value={depsSearch} onChange={(e) => setDepsSearch(e.target.value)} />
+                      <Button variant="secondary" onClick={() => setDepsShowAll((v) => !v)} className="h-9">
+                        {depsShowAll ? "Show 30" : "Show all"}
+                        <span className="ml-2 text-xs opacity-80">{totalDepsGroupsAfterFilter}</span>
+                      </Button>
+                    </div>
+                  </div>
 
-                    {depsGroupsFiltered.length === 0 ? (
-                      <div className="text-sm text-muted-foreground">
-                        {deps.length === 0 ? "No dependency CVEs found ✅ (good news)." : "No results match your filters."}
+                  {depsNote ? <div className="text-sm text-muted-foreground rounded-2xl border bg-muted/10 p-4">{depsNote}</div> : null}
+
+                  {depsGroupsFiltered.length === 0 ? (
+                    <div className="text-sm text-muted-foreground">
+                      {deps.length === 0 ? "No dependency CVEs found ✅ (good news)." : "No results match your filters."}
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl border overflow-hidden bg-background/50">
+                      <div className="grid grid-cols-[140px_1fr] md:grid-cols-[140px_1fr_300px] gap-2 px-4 py-2 text-xs text-muted-foreground border-b bg-muted/10">
+                        <div>Severity</div>
+                        <div>Package</div>
+                        <div className="hidden md:block text-right">Actions</div>
                       </div>
-                    ) : (
-                      <div className="rounded-md border overflow-hidden">
-                        <div className="grid grid-cols-[120px_1fr_280px] gap-2 px-3 py-2 text-xs text-muted-foreground border-b bg-muted/10">
-                          <div>Severity</div>
-                          <div>Package</div>
-                          <div className="text-right">Actions</div>
-                        </div>
 
-                        {depsGroupsFiltered.map((g) => {
-                          const isOpen = openDepGroupId === g.id;
+                      {depsGroupsFiltered.map((g) => {
+                        const isOpen = openDepGroupId === g.id;
 
-                          const upgradeCmd =
-                            g.bestFixedVersion
-                              ? g.ecosystem === "npm"
-                                ? `npm i ${g.name}@${g.bestFixedVersion}`
-                                : `pip install ${g.name}==${g.bestFixedVersion}`
-                              : "";
+                        const upgradeCmd =
+                          g.bestFixedVersion
+                            ? g.ecosystem === "npm"
+                              ? `npm i ${g.name}@${g.bestFixedVersion}`
+                              : `pip install ${g.name}==${g.bestFixedVersion}`
+                            : "";
 
-                          return (
-                            <div key={g.id} className="border-b">
-                              <div
-                                className={`px-3 py-2 grid grid-cols-[120px_1fr_280px] gap-2 items-center hover:bg-muted/20 cursor-pointer ${
-                                  isOpen ? "bg-muted/15" : ""
-                                }`}
-                                onClick={() => setOpenDepGroupId((prev) => (prev === g.id ? "" : g.id))}
-                              >
-                                <div className="flex items-center gap-2">
-                                  <SeverityBadge s={g.maxSeverity} />
-                                  <span className={`cipher-chevron ${isOpen ? "open" : ""}`} aria-hidden />
+                        return (
+                          <div key={g.id} className="border-b">
+                            <div
+                              className={[
+                                "px-4 py-3 grid grid-cols-[140px_1fr] md:grid-cols-[140px_1fr_300px] gap-2 items-center",
+                                "hover:bg-muted/20 cursor-pointer",
+                                isOpen ? "bg-muted/15" : "",
+                              ].join(" ")}
+                              onClick={() => setOpenDepGroupId((prev) => (prev === g.id ? "" : g.id))}
+                            >
+                              <div className="flex items-center gap-2">
+                                <SeverityBadge s={g.maxSeverity} />
+                                <span className={`cipher-chevron ${isOpen ? "open" : ""}`} aria-hidden />
+                              </div>
+
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold truncate">
+                                  {g.name}@{g.version} <span className="text-muted-foreground">({g.ecosystem})</span>
+                                </div>
+                                <div className="text-xs text-muted-foreground truncate">
+                                  {g.findings.length} vuln(s)
+                                  {g.bestFixedVersion ? ` • suggested: ${g.bestFixedVersion}` : ""}
                                 </div>
 
-                                <div className="min-w-0">
-                                  <div className="text-sm font-medium truncate">
-                                    {g.name}@{g.version} <span className="text-muted-foreground">({g.ecosystem})</span>
-                                  </div>
-                                  <div className="text-xs text-muted-foreground truncate">
-                                    {g.findings.length} vuln(s)
-                                    {g.bestFixedVersion ? ` • suggested: ${g.bestFixedVersion}` : ""}
-                                  </div>
-                                </div>
-
-                                <div className="flex items-center justify-end gap-2">
+                                {/* mobile actions row */}
+                                <div className="md:hidden mt-2 flex flex-wrap gap-2">
                                   <Button
                                     size="sm"
                                     variant="secondary"
-                                    onClick={async (e) => {
+                                    className="h-8"
+                                    onClick={(e) => {
                                       e.stopPropagation();
                                       const target = g.ecosystem === "npm" ? "package-lock.json" : "requirements.txt";
                                       const match =
-                                        repo?.files.find(
-                                          (p) => p.toLowerCase().endsWith(`/${target}`) || p.toLowerCase() === target
-                                        ) ?? "";
+                                        repo?.files.find((p) => p.toLowerCase().endsWith(`/${target}`) || p.toLowerCase() === target) ?? "";
                                       if (match) jumpToLocation(match, 1, 1, "Opened manifest ✅");
                                     }}
                                   >
@@ -1572,6 +1677,7 @@ const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overview
                                   <Button
                                     size="sm"
                                     variant="secondary"
+                                    className="h-8"
                                     disabled={!g.bestFixedVersion}
                                     onClick={async (e) => {
                                       e.stopPropagation();
@@ -1587,6 +1693,7 @@ const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overview
                                   <Button
                                     size="sm"
                                     variant="secondary"
+                                    className="h-8"
                                     disabled={!g.reference}
                                     onClick={(e) => {
                                       e.stopPropagation();
@@ -1598,423 +1705,488 @@ const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overview
                                 </div>
                               </div>
 
-                              {isOpen && (
-                                <div className="px-3 pb-3 pt-1 space-y-2">
-                                  {g.bestFixedVersion && (
-                                    <div className="text-sm">
-                                      <span className="font-medium">Suggested upgrade:</span> {g.bestFixedVersion}
-                                      <span className="text-muted-foreground">
-                                        {" "}
-                                        ({g.ecosystem === "npm" ? "npm" : "pip"})
-                                      </span>
-                                    </div>
-                                  )}
+                              <div className="hidden md:flex items-center justify-end gap-2">
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  className="h-8"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const target = g.ecosystem === "npm" ? "package-lock.json" : "requirements.txt";
+                                    const match =
+                                      repo?.files.find((p) => p.toLowerCase().endsWith(`/${target}`) || p.toLowerCase() === target) ?? "";
+                                    if (match) jumpToLocation(match, 1, 1, "Opened manifest ✅");
+                                  }}
+                                >
+                                  Manifest
+                                </Button>
 
-                                  <div className="rounded-md border overflow-hidden">
-                                    <div className="grid grid-cols-[170px_1fr_130px] gap-2 px-3 py-2 text-xs text-muted-foreground border-b bg-muted/10">
-                                      <div>Vuln</div>
-                                      <div>Summary</div>
-                                      <div>Fix</div>
-                                    </div>
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  className="h-8"
+                                  disabled={!g.bestFixedVersion}
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    if (!upgradeCmd) return;
+                                    await copyToClipboard(upgradeCmd);
+                                    flashCopy();
+                                    flashMsg("Copied upgrade command ✅");
+                                  }}
+                                >
+                                  Upgrade cmd
+                                </Button>
 
-                                    {g.findings.slice(0, 40).map((d) => (
-                                      <div
-                                        key={d.id}
-                                        className="px-3 py-2 grid grid-cols-[170px_1fr_130px] gap-2 border-b"
-                                      >
-                                        <div className="text-xs font-medium truncate">{d.vulnId}</div>
-                                        <div className="text-xs text-muted-foreground">{d.summary}</div>
-                                        <div className="text-xs">{d.fixedVersion ?? "—"}</div>
-                                      </div>
-                                    ))}
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  className="h-8"
+                                  disabled={!g.reference}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (g.reference) window.open(g.reference, "_blank");
+                                  }}
+                                >
+                                  Reference
+                                </Button>
+                              </div>
+                            </div>
 
-                                    {g.findings.length > 40 && (
-                                      <div className="p-3 text-xs text-muted-foreground">
-                                        Showing first 40 vulns for this package.
-                                      </div>
-                                    )}
+                            {isOpen ? (
+                              <div className="px-4 pb-4 pt-1 space-y-2">
+                                {g.bestFixedVersion ? (
+                                  <div className="text-sm">
+                                    <span className="font-semibold">Suggested upgrade:</span> {g.bestFixedVersion}
+                                    <span className="text-muted-foreground"> ({g.ecosystem === "npm" ? "npm" : "pip"})</span>
+                                  </div>
+                                ) : null}
+
+                                <div className="rounded-2xl border overflow-hidden bg-background/50">
+                                  <div className="grid grid-cols-[170px_1fr_130px] gap-2 px-4 py-2 text-xs text-muted-foreground border-b bg-muted/10">
+                                    <div>Vuln</div>
+                                    <div>Summary</div>
+                                    <div>Fix</div>
                                   </div>
 
-                                  <div className="flex flex-wrap gap-2">
+                                  {g.findings.slice(0, 40).map((d) => (
+                                    <div key={d.id} className="px-4 py-2 grid grid-cols-[170px_1fr_130px] gap-2 border-b">
+                                      <div className="text-xs font-semibold truncate">{d.vulnId}</div>
+                                      <div className="text-xs text-muted-foreground">{d.summary}</div>
+                                      <div className="text-xs">{d.fixedVersion ?? "—"}</div>
+                                    </div>
+                                  ))}
+
+                                  {g.findings.length > 40 ? (
+                                    <div className="p-3 text-xs text-muted-foreground">Showing first 40 vulns for this package.</div>
+                                  ) : null}
+                                </div>
+
+                                <div className="flex flex-wrap gap-2">
+                                  <Button
+                                    size="sm"
+                                    variant="secondary"
+                                    className="h-8"
+                                    onClick={async () => {
+                                      await copyToClipboard(`${g.name}@${g.version} (${g.ecosystem})`);
+                                      flashCopy();
+                                      flashMsg("Copied package ✅");
+                                    }}
+                                  >
+                                    Copy package
+                                  </Button>
+
+                                  {upgradeCmd ? (
                                     <Button
                                       size="sm"
                                       variant="secondary"
+                                      className="h-8"
                                       onClick={async () => {
-                                        await copyToClipboard(`${g.name}@${g.version} (${g.ecosystem})`);
+                                        await copyToClipboard(upgradeCmd);
                                         flashCopy();
-                                        flashMsg("Copied package ✅");
+                                        flashMsg("Copied upgrade command ✅");
                                       }}
                                     >
-                                      Copy package
+                                      Copy upgrade cmd
                                     </Button>
-
-                                    {upgradeCmd && (
-                                      <Button
-                                        size="sm"
-                                        variant="secondary"
-                                        onClick={async () => {
-                                          await copyToClipboard(upgradeCmd);
-                                          flashCopy();
-                                          flashMsg("Copied upgrade command ✅");
-                                        }}
-                                      >
-                                        Copy upgrade cmd
-                                      </Button>
-                                    )}
-                                  </div>
+                                  ) : null}
                                 </div>
-                              )}
-                            </div>
-                          );
-                        })}
-
-                        {!depsShowAll && totalDepsGroupsAfterFilter > 30 && (
-                          <div className="p-3 text-xs text-muted-foreground">
-                            Showing first 30 results. Click “Show all”.
+                              </div>
+                            ) : null}
                           </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
+                        );
+                      })}
+
+                      {!depsShowAll && totalDepsGroupsAfterFilter > 30 ? (
+                        <div className="p-3 text-xs text-muted-foreground">Showing first 30 results. Click “Show all”.</div>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </div>
+
+            {/* Vulnerabilities list */}
+            <div className="rounded-2xl border bg-card/70 shadow-sm p-4 md:p-5 space-y-3">
+              <div className="rounded-2xl border bg-background/50 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <SeverityFilter value={vulnFilter} onChange={setVulnFilter} counts={vulnCountsAll} total={vulns.length} />
+                  <div className="flex-1" />
+                  <Input className="w-full sm:w-[320px]" placeholder="Search vulnerabilities…" value={vulnSearch} onChange={(e) => setVulnSearch(e.target.value)} />
+                  <Button variant="secondary" onClick={() => setVulnShowAll((v) => !v)} className="h-9">
+                    {vulnShowAll ? "Show 30" : "Show all"}
+                    <span className="ml-2 text-xs opacity-80">{totalVulnsAfterFilter}</span>
+                  </Button>
+                </div>
               </div>
 
-              {/* Vulns list */}
-              <div className="rounded-md border p-3 space-y-3">
-                <div className="border rounded-md p-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <SeverityFilter value={vulnFilter} onChange={setVulnFilter} counts={vulnCountsAll} total={vulns.length} />
-                    <div className="flex-1" />
-                    <Input
-                      className="w-[260px]"
-                      placeholder="Search vulnerabilities…"
-                      value={vulnSearch}
-                      onChange={(e) => setVulnSearch(e.target.value)}
-                    />
-                    <Button variant="secondary" onClick={() => setVulnShowAll((v) => !v)}>
-                      {vulnShowAll ? "Show 30" : "Show all"}
-                      <span className="ml-2 text-xs opacity-80">{totalVulnsAfterFilter}</span>
-                    </Button>
-                  </div>
+              {vulnNote ? <div className="text-sm text-muted-foreground rounded-2xl border bg-muted/10 p-4">{vulnNote}</div> : null}
+
+              {visibleVulns.length === 0 ? (
+                <div className="text-sm text-muted-foreground">
+                  {vulns.length === 0 ? "No results yet. Click “Run scan”." : "No results match your filters."}
                 </div>
-
-                {vulnNote && <div className="text-sm text-muted-foreground border rounded-md p-3">{vulnNote}</div>}
-
-                {visibleVulns.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">
-                    {vulns.length === 0 ? "No results yet. Click “Run scan”." : "No results match your filters."}
+              ) : (
+                <div className="rounded-2xl border overflow-hidden bg-background/50">
+                  <div className="grid grid-cols-[160px_1fr] md:grid-cols-[160px_1fr_260px] gap-2 px-4 py-2 text-xs text-muted-foreground border-b bg-muted/10">
+                    <div>Severity</div>
+                    <div>Finding</div>
+                    <div className="hidden md:block text-right">Actions</div>
                   </div>
-                ) : (
-                  <div className="rounded-md border overflow-hidden">
-                    <div className="grid grid-cols-[150px_1fr_260px] gap-2 px-3 py-2 text-xs text-muted-foreground border-b bg-muted/10">
-                      <div>Severity</div>
-                      <div>Finding</div>
-                      <div className="text-right">Actions</div>
-                    </div>
 
-                    {visibleVulns.map((v) => {
-                      const isOpen = openVulnId === v.id;
-                      return (
-                        <div key={v.id} className="border-b">
-                          <div
-                            className={`px-3 py-2 grid grid-cols-[150px_1fr_260px] gap-2 items-center hover:bg-muted/20 cursor-pointer ${
-                              isOpen ? "bg-muted/15" : ""
-                            }`}
-                            onClick={() => setOpenVulnId((prev) => (prev === v.id ? "" : v.id))}
-                          >
-                            <div className="flex items-center gap-2">
-                              <SeverityBadge s={v.severity} />
-                              <span className={`cipher-chevron ${isOpen ? "open" : ""}`} aria-hidden />
-                            </div>
+                  {visibleVulns.map((v) => {
+                    const isOpen = openVulnId === v.id;
+                    return (
+                      <div key={v.id} className="border-b">
+                        <div
+                          className={[
+                            "px-4 py-3 grid grid-cols-[160px_1fr] md:grid-cols-[160px_1fr_260px] gap-2 items-start",
+                            "hover:bg-muted/20 cursor-pointer",
+                            isOpen ? "bg-muted/15" : "",
+                          ].join(" ")}
+                          onClick={() => setOpenVulnId((prev) => (prev === v.id ? "" : v.id))}
+                        >
+                          <div className="flex items-center gap-2">
+                            <SeverityBadge s={v.severity} />
+                            <span className={`cipher-chevron ${isOpen ? "open" : ""}`} aria-hidden />
+                          </div>
 
-                            <div className="min-w-0">
-                              <div className="text-sm font-medium truncate">{v.title}</div>
-                              <div className="text-xs text-muted-foreground truncate">
-                                <span
-                                  className="cipher-link"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setOpenVulnId(v.id);
-                                    jumpToLocation(v.file, v.line, v.line, "Jumped to finding ✅");
-                                  }}
-                                  role="button"
-                                  title="Jump to code"
-                                >
-                                  {v.file}:{v.line}
-                                </span>{" "}
-                                • {v.type}
-                              </div>
-                            </div>
-
-                            <div className="flex items-center justify-end gap-2">
-                              <Button
-                                size="sm"
-                                variant="secondary"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setOpenVulnId(v.id); // ✅ View expande también
-                                  jumpToLocation(v.file, v.line, v.line);
-                                }}
-                              >
-                                View
-                              </Button>
-
-                              <Button
-                                size="sm"
-                                variant="secondary"
-                                disabled={patchBusyId === v.id}
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold truncate">{v.title}</div>
+                            <div className="text-xs text-muted-foreground truncate mt-1">
+                              <span
+                                className="cipher-link"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setOpenVulnId(v.id);
-                                  generatePatch(
-                                    v.file,
-                                    v.title,
-                                    `Severity: ${v.severity}\nType: ${v.type}\nRecommendation: ${v.recommendation}\nLocation: ${v.file}:${v.line}\n\nSnippet:\n${v.snippet}`,
-                                    v.id,
-                                    v.line
-                                  );
+                                  jumpToLocation(v.file, v.line, v.line, "Jumped to finding ✅");
+                                }}
+                                role="button"
+                                title="Jump to code"
+                              >
+                                {v.file}:{v.line}
+                              </span>{" "}
+                              • {v.type}
+                            </div>
+
+                          </div>
+
+                          <div
+                            className="col-span-2 mt-2 flex flex-wrap gap-2 md:col-span-1 md:col-start-3 md:mt-0 md:justify-end md:items-start"
+                          >
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              className="h-8"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setOpenVulnId(v.id);
+                                jumpToLocation(v.file, v.line, v.line);
+                              }}
+                            >
+                              View
+                            </Button>
+
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              className="h-8"
+                              disabled={patchBusyId === v.id}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setOpenVulnId(v.id);
+                                generatePatch(
+                                  v.file,
+                                  v.title,
+                                  `Severity: ${v.severity}
+Type: ${v.type}
+Recommendation: ${v.recommendation}
+Location: ${v.file}:${v.line}
+
+Snippet:
+${v.snippet}`,
+                                  v.id,
+                                  v.line
+                                );
+                              }}
+                            >
+                              {patchBusyId === v.id ? "Generating…" : "Patch"}
+                            </Button>
+                          </div>
+
+                        </div>
+
+                        {isOpen ? (
+                          <div className="px-4 pb-4 pt-1 space-y-2">
+                            <pre className="text-xs whitespace-pre-wrap bg-muted/10 rounded-2xl p-3 border">{v.snippet}</pre>
+
+                            <div className="text-sm">
+                              <span className="font-semibold">Recommendation: </span>
+                              <span className="text-muted-foreground">{v.recommendation}</span>
+                            </div>
+
+                            {v.fix ? (
+                              <div className="text-sm">
+                                <span className="font-semibold">Suggested fix: </span>
+                                <span className="text-muted-foreground">{v.fix}</span>
+                                {typeof v.confidence === "number" ? (
+                                  <span className="text-muted-foreground"> (confidence {v.confidence.toFixed(2)})</span>
+                                ) : null}
+                              </div>
+                            ) : null}
+
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                className="h-8"
+                                onClick={async () => {
+                                  await copyToClipboard(`${v.file}:${v.line}`);
+                                  flashCopy();
+                                  flashMsg("Copied location ✅");
                                 }}
                               >
-                                {patchBusyId === v.id ? "Generating…" : "Patch"}
+                                Copy loc
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                className="h-8"
+                                onClick={async () => {
+                                  await copyToClipboard(v.snippet);
+                                  flashCopy();
+                                  flashMsg("Copied snippet ✅");
+                                }}
+                              >
+                                Copy snippet
                               </Button>
                             </div>
                           </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
 
-                          {isOpen && (
-                            <div className="px-3 pb-3 pt-1 space-y-2">
-                              <pre className="text-xs whitespace-pre-wrap bg-muted/10 rounded-md p-3 border">{v.snippet}</pre>
-
-                              <div className="text-sm">
-                                <span className="font-medium">Recommendation: </span>
-                                {v.recommendation}
-                              </div>
-
-                              {v.fix && (
-                                <div className="text-sm">
-                                  <span className="font-medium">Suggested fix: </span>
-                                  {v.fix}
-                                  {typeof v.confidence === "number" && (
-                                    <span className="text-muted-foreground"> (confidence {v.confidence.toFixed(2)})</span>
-                                  )}
-                                </div>
-                              )}
-
-                              <div className="flex flex-wrap gap-2">
-                                <Button
-                                  size="sm"
-                                  variant="secondary"
-                                  onClick={async () => {
-                                    await copyToClipboard(`${v.file}:${v.line}`);
-                                    flashCopy();
-                                    flashMsg("Copied location ✅");
-                                  }}
-                                >
-                                  Copy loc
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="secondary"
-                                  onClick={async () => {
-                                    await copyToClipboard(v.snippet);
-                                    flashCopy();
-                                    flashMsg("Copied snippet ✅");
-                                  }}
-                                >
-                                  Copy snippet
-                                </Button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-
-                    {!vulnShowAll && totalVulnsAfterFilter > 30 && (
-                      <div className="p-3 text-xs text-muted-foreground">Showing first 30 results. Click “Show all”.</div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {tab === "debt" && (
-            <div className="space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="text-lg font-semibold">Tech Debt</h2>
-                <Button onClick={runDebtScan} disabled={debtBusy}>
-                  {debtBusy ? "Scanning…" : "Run scan"}
-                </Button>
-              </div>
-
-              <div className="rounded-md border p-3 space-y-3">
-                <div className="border rounded-md p-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <SeverityFilter value={debtFilter} onChange={setDebtFilter} counts={debtCountsAll} total={debt.length} />
-                    <div className="flex-1" />
-                    <Input
-                      className="w-[260px]"
-                      placeholder="Search tech debt…"
-                      value={debtSearch}
-                      onChange={(e) => setDebtSearch(e.target.value)}
-                    />
-                    <Button variant="secondary" onClick={() => setDebtShowAll((v) => !v)}>
-                      {debtShowAll ? "Show 30" : "Show all"}
-                      <span className="ml-2 text-xs opacity-80">{totalDebtAfterFilter}</span>
-                    </Button>
-                  </div>
+                  {!vulnShowAll && totalVulnsAfterFilter > 30 ? (
+                    <div className="p-3 text-xs text-muted-foreground">Showing first 30 results. Click “Show all”.</div>
+                  ) : null}
                 </div>
+              )}
+            </div>
+          </section>
+        )}
 
-                {debtNote && <div className="text-sm text-muted-foreground border rounded-md p-3">{debtNote}</div>}
+        {tab === "debt" && (
+          <section className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-sm font-semibold">Tech Debt</div>
+                <div className="text-xs text-muted-foreground mt-1">Refactor opportunities and maintainability issues.</div>
+              </div>
+              <Button onClick={runDebtScan} disabled={debtBusy} className="h-9">
+                {debtBusy ? "Scanning…" : "Run scan"}
+              </Button>
+            </div>
 
-                {visibleDebt.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">
-                    {debt.length === 0 ? "No results yet. Click “Run scan”." : "No results match your filters."}
+            <div className="rounded-2xl border bg-card/70 shadow-sm p-4 md:p-5 space-y-3">
+              <div className="rounded-2xl border bg-background/50 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <SeverityFilter value={debtFilter} onChange={setDebtFilter} counts={debtCountsAll} total={debt.length} />
+                  <div className="flex-1" />
+                  <Input className="w-full sm:w-[320px]" placeholder="Search tech debt…" value={debtSearch} onChange={(e) => setDebtSearch(e.target.value)} />
+                  <Button variant="secondary" onClick={() => setDebtShowAll((v) => !v)} className="h-9">
+                    {debtShowAll ? "Show 30" : "Show all"}
+                    <span className="ml-2 text-xs opacity-80">{totalDebtAfterFilter}</span>
+                  </Button>
+                </div>
+              </div>
+
+              {debtNote ? <div className="text-sm text-muted-foreground rounded-2xl border bg-muted/10 p-4">{debtNote}</div> : null}
+
+              {visibleDebt.length === 0 ? (
+                <div className="text-sm text-muted-foreground">
+                  {debt.length === 0 ? "No results yet. Click “Run scan”." : "No results match your filters."}
+                </div>
+              ) : (
+                <div className="rounded-2xl border overflow-hidden bg-background/50">
+                  <div className="grid grid-cols-[160px_1fr] md:grid-cols-[160px_1fr_240px] gap-2 px-4 py-2 text-xs text-muted-foreground border-b bg-muted/10">
+                    <div>Severity</div>
+                    <div>Issue</div>
+                    <div className="hidden md:block text-right">Actions</div>
                   </div>
-                ) : (
-                  <div className="rounded-md border overflow-hidden">
-                    <div className="grid grid-cols-[150px_1fr_240px] gap-2 px-3 py-2 text-xs text-muted-foreground border-b bg-muted/10">
-                      <div>Severity</div>
-                      <div>Issue</div>
-                      <div className="text-right">Actions</div>
-                    </div>
 
-                    {visibleDebt.map((d) => {
-                      const isOpen = openDebtId === d.id;
-                      return (
-                        <div key={d.id} className="border-b">
-                          <div
-                            className={`px-3 py-2 grid grid-cols-[150px_1fr_240px] gap-2 items-center hover:bg-muted/20 cursor-pointer ${
-                              isOpen ? "bg-muted/15" : ""
-                            }`}
-                            onClick={() => setOpenDebtId((prev) => (prev === d.id ? "" : d.id))}
-                          >
-                            <div className="flex items-center gap-2">
-                              <SeverityBadge s={d.severity} />
-                              <span className={`cipher-chevron ${isOpen ? "open" : ""}`} aria-hidden />
-                            </div>
+                  {visibleDebt.map((d) => {
+                    const isOpen = openDebtId === d.id;
+                    return (
+                      <div key={d.id} className="border-b">
+                        <div
+                          className={[
+                            "px-4 py-3 grid grid-cols-[160px_1fr] md:grid-cols-[160px_1fr_240px] gap-2 items-start",
+                            "hover:bg-muted/20 cursor-pointer",
+                            isOpen ? "bg-muted/15" : "",
+                          ].join(" ")}
+                          onClick={() => setOpenDebtId((prev) => (prev === d.id ? "" : d.id))}
+                        >
+                          <div className="flex items-center gap-2">
+                            <SeverityBadge s={d.severity} />
+                            <span className={`cipher-chevron ${isOpen ? "open" : ""}`} aria-hidden />
+                          </div>
 
-                            <div className="min-w-0">
-                              <div className="text-sm font-medium truncate">{d.title}</div>
-                              <div className="text-xs text-muted-foreground truncate">
-                                <span
-                                  className="cipher-link"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setOpenDebtId(d.id);
-                                    jumpToLocation(d.file, d.line, d.line, "Jumped to issue ✅");
-                                  }}
-                                  role="button"
-                                  title="Jump to code"
-                                >
-                                  {d.file}:{d.line}
-                                </span>{" "}
-                                • {d.type}
-                              </div>
-                            </div>
-
-                            <div className="flex items-center justify-end gap-2">
-                              <Button
-                                size="sm"
-                                variant="secondary"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setOpenDebtId(d.id); // ✅ View expande
-                                  jumpToLocation(d.file, d.line, d.line);
-                                }}
-                              >
-                                View
-                              </Button>
-
-                              <Button
-                                size="sm"
-                                variant="secondary"
-                                disabled={patchBusyId === d.id}
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold truncate">{d.title}</div>
+                            <div className="text-xs text-muted-foreground truncate mt-1">
+                              <span
+                                className="cipher-link"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setOpenDebtId(d.id);
-                                  generatePatch(
-                                    d.file,
-                                    d.title,
-                                    `Severity: ${d.severity}\nType: ${d.type}\nLocation: ${d.file}:${d.line}\n\nDetails: ${d.details}\nSuggestion: ${d.suggestion}`,
-                                    d.id,
-                                    d.line
-                                  );
+                                  jumpToLocation(d.file, d.line, d.line, "Jumped to issue ✅");
+                                }}
+                                role="button"
+                                title="Jump to code"
+                              >
+                                {d.file}:{d.line}
+                              </span>{" "}
+                              • {d.type}
+                            </div>
+
+                          </div>
+
+                          <div
+                            className="col-span-2 mt-2 flex flex-wrap gap-2 md:col-span-1 md:col-start-3 md:mt-0 md:justify-end md:items-start"
+                          >
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              className="h-8"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setOpenDebtId(d.id);
+                                jumpToLocation(d.file, d.line, d.line);
+                              }}
+                            >
+                              View
+                            </Button>
+
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              className="h-8"
+                              disabled={patchBusyId === d.id}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setOpenDebtId(d.id);
+                                generatePatch(
+                                  d.file,
+                                  d.title,
+                                  `Severity: ${d.severity}
+Type: ${d.type}
+Location: ${d.file}:${d.line}
+
+Details:
+${d.details}
+
+Suggestion:
+${d.suggestion}`,
+                                  d.id,
+                                  d.line
+                                );
+                              }}
+                            >
+                              {patchBusyId === d.id ? "Generating…" : "Patch"}
+                            </Button>
+                          </div>
+
+                        </div>
+
+                        {isOpen ? (
+                          <div className="px-4 pb-4 pt-1 space-y-2">
+                            <div className="text-sm">
+                              <span className="font-semibold">Details: </span>
+                              <span className="text-muted-foreground">{d.details}</span>
+                            </div>
+
+                            <div className="text-sm">
+                              <span className="font-semibold">Suggestion: </span>
+                              <span className="text-muted-foreground">{d.suggestion}</span>
+                            </div>
+
+                            {d.fix ? (
+                              <div className="text-sm">
+                                <span className="font-semibold">Suggested refactor: </span>
+                                <span className="text-muted-foreground">{d.fix}</span>
+                                {typeof d.confidence === "number" ? (
+                                  <span className="text-muted-foreground"> (confidence {d.confidence.toFixed(2)})</span>
+                                ) : null}
+                              </div>
+                            ) : null}
+
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                className="h-8"
+                                onClick={async () => {
+                                  await copyToClipboard(`${d.file}:${d.line}`);
+                                  flashCopy();
+                                  flashMsg("Copied location ✅");
                                 }}
                               >
-                                {patchBusyId === d.id ? "Generating…" : "Patch"}
+                                Copy loc
                               </Button>
                             </div>
                           </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
 
-                          {isOpen && (
-                            <div className="px-3 pb-3 pt-1 space-y-2">
-                              <div className="text-sm">
-                                <span className="font-medium">Details: </span>
-                                {d.details}
-                              </div>
-
-                              <div className="text-sm">
-                                <span className="font-medium">Suggestion: </span>
-                                {d.suggestion}
-                              </div>
-
-                              {d.fix && (
-                                <div className="text-sm">
-                                  <span className="font-medium">Suggested refactor: </span>
-                                  {d.fix}
-                                  {typeof d.confidence === "number" && (
-                                    <span className="text-muted-foreground"> (confidence {d.confidence.toFixed(2)})</span>
-                                  )}
-                                </div>
-                              )}
-
-                              <div className="flex flex-wrap gap-2">
-                                <Button
-                                  size="sm"
-                                  variant="secondary"
-                                  onClick={async () => {
-                                    await copyToClipboard(`${d.file}:${d.line}`);
-                                    flashCopy();
-                                    flashMsg("Copied location ✅");
-                                  }}
-                                >
-                                  Copy loc
-                                </Button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-
-                    {!debtShowAll && totalDebtAfterFilter > 30 && (
-                      <div className="p-3 text-xs text-muted-foreground">Showing first 30 results. Click “Show all”.</div>
-                    )}
-                  </div>
-                )}
-              </div>
+                  {!debtShowAll && totalDebtAfterFilter > 30 ? (
+                    <div className="p-3 text-xs text-muted-foreground">Showing first 30 results. Click “Show all”.</div>
+                  ) : null}
+                </div>
+              )}
             </div>
-          )}
+          </section>
+        )}
 
-          {/* ✅ NEW: DOCS (Priority C) — sin tocar tu diseño, solo nuevo tab */}
-          {tab === "docs" && (
-            <div className="grid gap-4 md:grid-cols-[340px_1fr]">
-              <div className="space-y-3">
+        {tab === "docs" && (
+          <section className="grid gap-4 md:grid-cols-[360px_1fr]">
+            <div className="rounded-2xl border bg-card/70 shadow-sm">
+              <div className="p-4 md:p-5 space-y-3">
                 <div className="flex items-center justify-between gap-2">
                   <div>
-                    <div className="text-sm font-medium">Docs</div>
+                    <div className="text-sm font-semibold">Docs</div>
                     <div className="text-xs text-muted-foreground">Auto-generated per file (cached)</div>
                   </div>
 
-                  <Button variant="secondary" onClick={generateDocsIndex} disabled={docsIndexBusy}>
+                  <Button variant="secondary" onClick={generateDocsIndex} disabled={docsIndexBusy} className="h-9">
                     {docsIndexBusy ? "Generating…" : "Generate index"}
                   </Button>
                 </div>
 
                 <Input placeholder="Search docs…" value={docsQ} onChange={(e) => setDocsQ(e.target.value)} />
 
-                <div className="h-[520px] overflow-auto rounded-md border">
+                <div className="h-[38vh] md:h-[520px] overflow-auto rounded-xl border bg-background/50">
                   {docsIndexFiltered.length === 0 ? (
                     <div className="p-3 text-sm text-muted-foreground">
                       {docsIndex.length === 0 ? "No docs index yet. Click “Generate index”." : "No matches."}
@@ -2024,11 +2196,12 @@ const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overview
                       <button
                         key={it.path}
                         onClick={() => openDoc(it.path)}
-                        className={`w-full text-left text-sm px-3 py-2 border-b hover:bg-muted/30 ${
-                          docSelected === it.path ? "bg-muted/40" : ""
-                        }`}
+                        className={[
+                          "w-full text-left text-sm px-3 py-2 border-b hover:bg-muted/30",
+                          docSelected === it.path ? "bg-muted/40" : "",
+                        ].join(" ")}
                       >
-                        <div className="font-medium truncate">{it.title || it.path}</div>
+                        <div className="font-semibold truncate">{it.title || it.path}</div>
                         <div className="text-xs text-muted-foreground truncate">{it.path}</div>
                         <div className="text-xs text-muted-foreground truncate">{it.purpose}</div>
                       </button>
@@ -2036,42 +2209,42 @@ const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overview
                   )}
                 </div>
               </div>
+            </div>
 
-              <div className="space-y-3">
+            <div className="rounded-2xl border bg-card/70 shadow-sm">
+              <div className="p-4 md:p-5 space-y-3">
                 <div className="flex items-center justify-between gap-2">
-                  <div className="text-sm text-muted-foreground truncate">
-                    {docSelected ? docSelected : "Select a doc item"}
-                  </div>
-
-                  <div className="flex gap-2">
-                    <Button
-                      variant="secondary"
-                      disabled={!docSelected}
-                      onClick={() => {
-                        if (!docSelected) return;
-                        jumpToLocation(docSelected, 1, 1, "Opened file ✅");
-                      }}
-                    >
-                      Open file
-                    </Button>
-                  </div>
+                  <div className="text-xs text-muted-foreground truncate">{docSelected ? docSelected : "Select a doc item"}</div>
+                  <Button
+                    variant="secondary"
+                    className="h-9"
+                    disabled={!docSelected}
+                    onClick={() => {
+                      if (!docSelected) return;
+                      jumpToLocation(docSelected, 1, 1, "Opened file ✅");
+                    }}
+                  >
+                    Open file
+                  </Button>
                 </div>
 
-                {docsErr && (
-                  <pre className="whitespace-pre-wrap text-sm p-4 rounded-md border border-red-500/40">{docsErr}</pre>
-                )}
+                {docsErr ? (
+                  <pre className="whitespace-pre-wrap text-sm p-4 rounded-2xl border border-red-500/40 bg-red-500/5">
+                    {docsErr}
+                  </pre>
+                ) : null}
 
-                {docsBusy && <div className="text-sm text-muted-foreground">Generating docs…</div>}
+                {docsBusy ? <div className="text-sm text-muted-foreground">Generating docs…</div> : null}
 
-                {!docsBusy && doc && (
-                  <div className="rounded-md border p-4 space-y-3">
+                {!docsBusy && doc ? (
+                  <div className="rounded-2xl border bg-background/50 p-4 space-y-3">
                     <div>
                       <div className="text-lg font-semibold">{doc.title}</div>
                       <div className="text-xs text-muted-foreground">{doc.updatedAt}</div>
                     </div>
 
                     <div className="text-sm">
-                      <span className="font-medium">Purpose: </span>
+                      <span className="font-semibold">Purpose: </span>
                       <span className="text-muted-foreground">{doc.purpose}</span>
                     </div>
 
@@ -2084,33 +2257,36 @@ const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overview
                     <DocList label="Examples" items={doc.examples} />
                     <DocList label="Notes" items={doc.notes} />
                   </div>
-                )}
+                ) : null}
 
-                {!docsBusy && !doc && !docsErr && (
+                {!docsBusy && !doc && !docsErr ? (
                   <div className="text-sm text-muted-foreground">Pick an item from the index.</div>
-                )}
+                ) : null}
               </div>
             </div>
-          )}
-        </CardContent>
-      </Card>
+          </section>
+        )}
+      </main>
 
-      {/* Patch preview modal */}
-      {patchOpen && patch && (
+      {/* Patch preview modal (premium + responsive) */}
+      {patchOpen && patch ? (
         <div className="fixed inset-0 z-50">
-          <div className="absolute inset-0 bg-black/50" onClick={closePatchModal} />
-          <div className="absolute inset-0 flex items-center justify-center p-4">
-            <div className="w-full max-w-5xl rounded-xl border bg-background shadow-xl">
-              <div className="p-4 border-b flex items-start justify-between gap-3">
+          <div className="absolute inset-0 bg-black/55" onClick={closePatchModal} />
+          <div className="absolute inset-0 flex items-center justify-center p-3 md:p-6">
+            <div className="w-full max-w-5xl h-[92vh] rounded-2xl border bg-background shadow-2xl overflow-hidden flex flex-col">
+              {/* Header */}
+              <div className="p-4 border-b bg-background/80 backdrop-blur flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="font-semibold truncate">
-                    Patch preview — <span className="text-muted-foreground">{patch.file}</span>
+                    Patch preview — <span className="text-muted-foreground font-mono">{patch.file}</span>
                   </div>
-                  {patch.note && <div className="text-xs text-muted-foreground mt-1">{patch.note}</div>}
+                  {patch.note ? <div className="text-xs text-muted-foreground mt-1">{patch.note}</div> : null}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
                   <Button
+                    size="sm"
+                    className="h-8"
                     variant={copiedOk ? "default" : "secondary"}
                     onClick={async () => {
                       await copyToClipboard(patch.updated);
@@ -2122,6 +2298,8 @@ const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overview
                   </Button>
 
                   <Button
+                    size="sm"
+                    className="h-8"
                     variant={downloadOk ? "default" : "secondary"}
                     onClick={() => {
                       const name = `cipher-ai-patched-${patch.file.replace(/[\/\\]/g, "_")}`;
@@ -2133,43 +2311,74 @@ const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overview
                     {downloadOk ? "Downloaded ✓" : "Download"}
                   </Button>
 
-                  <Button onClick={applyPatchPreview}>Apply preview</Button>
+                  <Button size="sm" className="h-8" onClick={applyPatchPreview}>
+                    Apply preview
+                  </Button>
 
-                  <Button variant="secondary" onClick={openPatchedInEditorOneOff}>
+                  <Button size="sm" className="h-8" variant="secondary" onClick={openPatchedInEditorOneOff}>
                     Open patched
                   </Button>
 
-                  <Button variant="secondary" onClick={openOriginalFileInEditor}>
+                  <Button size="sm" className="h-8" variant="secondary" onClick={openOriginalFileInEditor}>
                     Open file
                   </Button>
 
-                  <Button onClick={closePatchModal}>Close</Button>
+                  <Button size="sm" className="h-8" variant="secondary" onClick={closePatchModal}>
+                    Close
+                  </Button>
                 </div>
               </div>
 
-              <div className="p-4 space-y-3">
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    variant={patchView === "compare" ? "default" : "secondary"}
-                    onClick={() => setPatchView("compare")}
-                  >
-                    Compare
-                  </Button>
-                  <Button
-                    variant={patchView === "updated" ? "default" : "secondary"}
-                    onClick={() => setPatchView("updated")}
-                  >
-                    Updated file
-                  </Button>
-                  <Button variant={patchView === "diff" ? "default" : "secondary"} onClick={() => setPatchView("diff")}>
-                    Unified diff
-                  </Button>
-                </div>
+              {/* Tabs */}
+              <div className="px-4 py-3 border-b bg-background/60 backdrop-blur flex flex-wrap gap-2">
+                <Button size="sm" className="h-8" variant={patchView === "compare" ? "default" : "secondary"} onClick={() => setPatchView("compare")}>
+                  Compare
+                </Button>
+                <Button size="sm" className="h-8" variant={patchView === "updated" ? "default" : "secondary"} onClick={() => setPatchView("updated")}>
+                  Updated file
+                </Button>
+                <Button size="sm" className="h-8" variant={patchView === "diff" ? "default" : "secondary"} onClick={() => setPatchView("diff")}>
+                  Unified diff
+                </Button>
 
-                {patchView === "compare" && (
-                  <div className="rounded-md border overflow-hidden">
+                <div className="flex-1" />
+
+                {patchView === "diff" ? (
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      className="h-8"
+                      variant="secondary"
+                      onClick={async () => {
+                        await copyToClipboard(patch.diff);
+                        flashCopy();
+                        flashMsg("Copied unified diff ✅");
+                      }}
+                    >
+                      Copy diff
+                    </Button>
+                    <Button
+                      size="sm"
+                      className="h-8"
+                      variant="secondary"
+                      onClick={() => {
+                        const name = `cipher-ai-diff-${patch.file.replace(/[\/\\]/g, "_")}.diff`;
+                        downloadText(name, patch.diff);
+                        flashMsg("Downloaded diff ✅");
+                      }}
+                    >
+                      Download diff
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+
+              {/* Body */}
+              <div className="flex-1 overflow-hidden p-4">
+                {patchView === "compare" ? (
+                  <div className="h-full rounded-2xl border overflow-hidden bg-background/50">
                     <DiffEditor
-                      height="560px"
+                      height="100%"
                       language={guessLanguage(patch.file)}
                       original={patch.original}
                       modified={patch.updated}
@@ -2182,12 +2391,12 @@ const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overview
                       }}
                     />
                   </div>
-                )}
+                ) : null}
 
-                {patchView === "updated" && (
-                  <div className="rounded-md border overflow-hidden">
+                {patchView === "updated" ? (
+                  <div className="h-full rounded-2xl border overflow-hidden bg-background/50">
                     <Editor
-                      height="560px"
+                      height="100%"
                       language={guessLanguage(patch.file)}
                       value={patch.updated}
                       options={{
@@ -2198,83 +2407,22 @@ const overviewNextSteps = normalizeBulletList(overviewAny?.nextSteps ?? overview
                       }}
                     />
                   </div>
-                )}
+                ) : null}
 
-                {patchView === "diff" && (
-                  <div className="rounded-md border overflow-hidden">
-                    <div className="p-2 border-b flex items-center justify-between gap-2">
-                      <div className="text-sm text-muted-foreground">Smart unified diff (hunks)</div>
-                      <div className="flex gap-2">
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={async () => {
-                            await copyToClipboard(patch.diff);
-                            flashCopy();
-                            flashMsg("Copied unified diff ✅");
-                          }}
-                        >
-                          Copy diff
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => {
-                            const name = `cipher-ai-diff-${patch.file.replace(/[\/\\]/g, "_")}.diff`;
-                            downloadText(name, patch.diff);
-                            flashMsg("Downloaded diff ✅");
-                          }}
-                        >
-                          Download diff
-                        </Button>
-                      </div>
+                {patchView === "diff" ? (
+                  <div className="h-full rounded-2xl border overflow-hidden bg-background/50 flex flex-col">
+                    <div className="px-3 py-2 border-b text-sm text-muted-foreground">
+                      Smart unified diff (hunks)
                     </div>
-                    <pre className="text-xs whitespace-pre-wrap p-3 bg-muted/10 overflow-auto max-h-[560px]">{patch.diff}</pre>
+                    <pre className="flex-1 text-xs whitespace-pre-wrap p-3 bg-muted/10 overflow-auto">{patch.diff}</pre>
                   </div>
-                )}
+                ) : null}
               </div>
             </div>
           </div>
         </div>
-      )}
-
-      {/* Global styles */}
-      <style jsx global>{`
-        .cipher-revealLine {
-          background: rgba(255, 200, 0, 0.18);
-          outline: 1px solid rgba(255, 200, 0, 0.35);
-        }
-        .cipher-revealLineGutter {
-          border-left: 3px solid rgba(255, 200, 0, 0.9);
-        }
-        .cipher-link {
-          cursor: pointer;
-          text-decoration: underline;
-          text-underline-offset: 3px;
-          opacity: 0.95;
-        }
-        .cipher-link:hover {
-          opacity: 1;
-        }
-
-        /* inline chevron (no libs) + rotate */
-        .cipher-chevron {
-          display: inline-block;
-          width: 9px;
-          height: 9px;
-          border-right: 2px solid currentColor;
-          border-bottom: 2px solid currentColor;
-          transform: rotate(-45deg);
-          transition: transform 140ms ease, opacity 140ms ease;
-          opacity: 0.7;
-          translate: 0 -1px;
-        }
-        .cipher-chevron.open {
-          transform: rotate(45deg);
-          opacity: 0.95;
-        }
-      `}</style>
-    </main>
+      ) : null}
+    </AnalysisShell>
   );
 }
 
@@ -2282,7 +2430,7 @@ function DocList({ label, items }: { label: string; items?: string[] }) {
   if (!items || items.length === 0) return null;
   return (
     <div className="space-y-1">
-      <div className="text-sm font-medium">{label}</div>
+      <div className="text-sm font-semibold">{label}</div>
       <ul className="list-disc pl-5 text-sm text-muted-foreground space-y-1">
         {items.slice(0, 12).map((x, i) => (
           <li key={i}>{x}</li>
@@ -2292,20 +2440,20 @@ function DocList({ label, items }: { label: string; items?: string[] }) {
   );
 }
 
-function SeverityPill({ s, n }: { s: Severity; n: number }) {
-  const variant =
-    s === "CRITICAL" ? "destructive" : s === "HIGH" ? "default" : s === "MEDIUM" ? "secondary" : "outline";
+function SeverityChip({ s, n }: { s: Severity; n: number }) {
   return (
-    <Badge variant={variant as any} title={`${s} findings`}>
-      {s}: {n}
-    </Badge>
+    <span className="cipher-sev" data-sev={s} title={`${s} findings`}>
+      {s} <span className="cipher-count">{n}</span>
+    </span>
   );
 }
 
 function SeverityBadge({ s }: { s: Severity }) {
-  const variant =
-    s === "CRITICAL" ? "destructive" : s === "HIGH" ? "default" : s === "MEDIUM" ? "secondary" : "outline";
-  return <Badge variant={variant as any}>{s}</Badge>;
+  return (
+    <span className="cipher-sev" data-sev={s}>
+      {s}
+    </span>
+  );
 }
 
 function SeverityFilter({
@@ -2405,7 +2553,10 @@ function pep440Gt(a: string, b: string) {
   return false;
 }
 function pepNums(v: string) {
-  const parts = String(v).split(/[^0-9]+/).filter(Boolean).map((x) => Number(x));
+  const parts = String(v)
+    .split(/[^0-9]+/)
+    .filter(Boolean)
+    .map((x) => Number(x));
   return parts.length ? parts : [0];
 }
 

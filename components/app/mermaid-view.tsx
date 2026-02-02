@@ -5,15 +5,23 @@ import mermaid from "mermaid";
 
 export function MermaidView({ chart }: { chart: string }) {
   const [svg, setSvg] = useState<string>("");
-  const rid = useId().replace(/:/g, "_"); // estable SSR/CSR
+  const rid = useId().replace(/:/g, "_");
 
   useEffect(() => {
     let cancelled = false;
 
+    const isDark = document.documentElement.classList.contains("dark");
+
     mermaid.initialize({
       startOnLoad: false,
       securityLevel: "strict",
-      theme: "dark",
+      theme: isDark ? "dark" : "base",
+      themeVariables: {
+        primaryColor: "#7C3AED",
+        primaryTextColor: isDark ? "#F4F1FF" : "#181523",
+        lineColor: isDark ? "#6b5aa6" : "#b9a9e6",
+        fontFamily: "var(--font-geist-sans)",
+      },
     });
 
     (async () => {
@@ -33,7 +41,7 @@ export function MermaidView({ chart }: { chart: string }) {
 
   return (
     <div
-      className="w-full overflow-auto rounded-md border bg-muted/20 p-3"
+      className="w-full overflow-auto rounded-xl border bg-card/60 backdrop-blur p-3"
       dangerouslySetInnerHTML={{ __html: svg }}
     />
   );

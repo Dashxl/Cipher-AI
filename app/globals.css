@@ -1,13 +1,20 @@
 @import "tailwindcss";
+@source "../**/*.{ts,tsx,js,jsx,mdx}";
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+  --breakpoint-sm: 640px;
+  --breakpoint-md: 768px;
+  --breakpoint-lg: 1024px;
+  --breakpoint-xl: 1280px;
+  --breakpoint-2xl: 1536px;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -16,11 +23,13 @@
   --color-sidebar-primary: var(--sidebar-primary);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar: var(--sidebar);
+
   --color-chart-5: var(--chart-5);
   --color-chart-4: var(--chart-4);
   --color-chart-3: var(--chart-3);
   --color-chart-2: var(--chart-2);
   --color-chart-1: var(--chart-1);
+
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
@@ -37,6 +46,7 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -47,98 +57,283 @@
 }
 
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --radius: 0.75rem;
+
+  /* -------------------------------
+     Cipher AI Brand (Light)
+     warm neutrals + violet/cyan accents
+  -------------------------------- */
+  --cipher-violet: #5b2eff;
+  --cipher-violet-2: #7c5cff;
+  --cipher-cyan: #2fe0c7;
+  --cipher-sand: #f3eee8;
+
+  --background: #fffdf9;
+  --foreground: #1c1716;
+
+  --card: #ffffff;
+  --card-foreground: #1c1716;
+
+  --popover: #ffffff;
+  --popover-foreground: #1c1716;
+
+  /* Primary = violet (premium, not GitHub) */
+  --primary: var(--cipher-violet);
+  --primary-foreground: #faf8ff;
+
+  /* Secondary/muted = warm sand */
+  --secondary: var(--cipher-sand);
+  --secondary-foreground: #1c1716;
+
+  --muted: #f6f1ec;
+  --muted-foreground: #6a5f5a;
+
+  /* Accent = soft violet tint (used for hovers) */
+  --accent: #efe9ff;
+  --accent-foreground: #241a3a;
+
+  --destructive: #ef4444;
+
+  --border: #eadfd6;
+  --input: #eadfd6;
+
+  --ring: rgba(91, 46, 255, 0.35);
+
+  /* charts (optional) */
+  --chart-1: #5b2eff;
+  --chart-2: #2fe0c7;
+  --chart-3: #f59e0b;
+  --chart-4: #ef4444;
+  --chart-5: #8b5cf6;
+
+  /* Sidebar */
+  --sidebar: #fffaf4;
+  --sidebar-foreground: #1c1716;
+  --sidebar-primary: var(--cipher-violet);
+  --sidebar-primary-foreground: #faf8ff;
+  --sidebar-accent: #f1ece6;
+  --sidebar-accent-foreground: #1c1716;
+  --sidebar-border: #eadfd6;
+  --sidebar-ring: rgba(91, 46, 255, 0.35);
+
+  /* Severity tokens */
+  --sev-critical: #ef4444;
+  --sev-high: var(--cipher-violet-2);
+  --sev-medium: #f59e0b;
+  --sev-low: #22c55e;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  /* -------------------------------
+     Cipher AI Brand (Dark)
+  -------------------------------- */
+  --cipher-violet: #7c5cff;
+  --cipher-violet-2: #a78bfa;
+  --cipher-cyan: #2fe0c7;
+  --cipher-sand: #1a1824;
+
+  --background: #0b0a10;
+  --foreground: #f2ecff;
+
+  --card: #12111a;
+  --card-foreground: #f2ecff;
+
+  --popover: #12111a;
+  --popover-foreground: #f2ecff;
+
+  --primary: var(--cipher-violet);
+  --primary-foreground: #0b0a10;
+
+  --secondary: #1a1824;
+  --secondary-foreground: #f2ecff;
+
+  --muted: #1a1824;
+  --muted-foreground: #b9b1cc;
+
+  --accent: #1d1632;
+  --accent-foreground: #f2ecff;
+
+  --destructive: #f87171;
+
+  --border: rgba(255, 255, 255, 0.10);
+  --input: rgba(255, 255, 255, 0.15);
+
+  --ring: rgba(124, 92, 255, 0.45);
+
+  --chart-1: #7c5cff;
+  --chart-2: #2fe0c7;
+  --chart-3: #fbbf24;
+  --chart-4: #f87171;
+  --chart-5: #a78bfa;
+
+  --sidebar: #0f0e16;
+  --sidebar-foreground: #f2ecff;
+  --sidebar-primary: var(--cipher-violet);
+  --sidebar-primary-foreground: #0b0a10;
+  --sidebar-accent: #171524;
+  --sidebar-accent-foreground: #f2ecff;
+  --sidebar-border: rgba(255, 255, 255, 0.10);
+  --sidebar-ring: rgba(124, 92, 255, 0.45);
+
+  --sev-critical: #f87171;
+  --sev-high: #a78bfa;
+  --sev-medium: #fbbf24;
+  --sev-low: #4ade80;
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
+  html,
+  body {
+    height: 100%;
+  }
   body {
     @apply bg-background text-foreground;
   }
-  /* Cipher AI: Monaco line highlight for jump-to-line */
+}
+
+/* ---------------------------------------
+   Cipher: App background (subtle premium)
+---------------------------------------- */
+.cipher-app-bg {
+  background:
+    radial-gradient(900px 520px at 12% -10%, rgba(91, 46, 255, 0.14), transparent 60%),
+    radial-gradient(740px 520px at 110% 20%, rgba(47, 224, 199, 0.10), transparent 60%);
+}
+.dark .cipher-app-bg {
+  background:
+    radial-gradient(900px 520px at 12% -10%, rgba(124, 92, 255, 0.22), transparent 60%),
+    radial-gradient(740px 520px at 110% 20%, rgba(47, 224, 199, 0.12), transparent 62%);
+}
+
+/* ---------------------------------------
+   Cipher: Links + chevrons + line reveal
+---------------------------------------- */
+.cipher-link {
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  opacity: 0.95;
+}
+.cipher-link:hover {
+  opacity: 1;
+}
+
+.cipher-chevron {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 140ms ease, opacity 140ms ease;
+  opacity: 0.7;
+  translate: 0 -1px;
+}
+.cipher-chevron.open {
+  transform: rotate(45deg);
+  opacity: 0.95;
+}
+
+/* Monaco reveal line (used by jump-to-line + findings) */
+.cipher-revealLine {
+  background: rgba(255, 200, 0, 0.16);
+  outline: 1px solid rgba(255, 200, 0, 0.32);
+}
+.cipher-revealLineGutter {
+  border-left: 3px solid rgba(255, 200, 0, 0.85);
+}
+
+/* Cipher AI: Monaco line highlight for jump-to-line */
 .cipher-line-highlight {
   background: rgba(255, 214, 10, 0.18);
 }
-
 .cipher-line-glyph {
   background: rgba(255, 214, 10, 0.9);
   border-radius: 9999px;
 }
-
 /* Cipher AI: highlight when jumping to a finding line */
 .cipher-highlight-line {
-  background: rgba(250, 204, 21, 0.18); /* amarillo suave */
+  background: rgba(250, 204, 21, 0.18);
 }
 .dark .cipher-highlight-line {
   background: rgba(250, 204, 21, 0.14);
 }
 
-
+/* ---------------------------------------
+   Cipher: Severity badges (premium, legible)
+---------------------------------------- */
+.cipher-sev {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  border: 1px solid transparent;
+  white-space: nowrap;
 }
+
+.cipher-sev[data-sev="CRITICAL"] {
+  color: var(--sev-critical);
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+.dark .cipher-sev[data-sev="CRITICAL"] {
+  background: rgba(248, 113, 113, 0.14);
+  border-color: rgba(248, 113, 113, 0.40);
+}
+
+.cipher-sev[data-sev="HIGH"] {
+  color: var(--sev-high);
+  background: rgba(124, 92, 255, 0.14);
+  border-color: rgba(124, 92, 255, 0.35);
+}
+.dark .cipher-sev[data-sev="HIGH"] {
+  background: rgba(124, 92, 255, 0.18);
+  border-color: rgba(124, 92, 255, 0.45);
+}
+
+.cipher-sev[data-sev="MEDIUM"] {
+  color: var(--sev-medium);
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.35);
+}
+.dark .cipher-sev[data-sev="MEDIUM"] {
+  background: rgba(251, 191, 36, 0.16);
+  border-color: rgba(251, 191, 36, 0.45);
+}
+
+.cipher-sev[data-sev="LOW"] {
+  color: var(--sev-low);
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.32);
+}
+.dark .cipher-sev[data-sev="LOW"] {
+  background: rgba(74, 222, 128, 0.14);
+  border-color: rgba(74, 222, 128, 0.38);
+}
+
+/* small count pill */
+.cipher-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.5rem;
+  height: 1.25rem;
+  padding: 0 0.35rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 650;
+  background: rgba(0,0,0,0.06);
+}
+.dark .cipher-count {
+  background: rgba(255,255,255,0.08);
+}
+
+.cipher-desktop-sidebar { display: flex !important; }
+@media (max-width: 767px) { .cipher-desktop-sidebar { display: none !important; } }

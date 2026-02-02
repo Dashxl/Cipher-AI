@@ -1,8 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useMemo, useRef, useState } from "react";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Copy, Check, Download, FileCode2, Sparkles, X } from "lucide-react";
 
 export type PatchPreviewState = {
   open: boolean;
@@ -10,18 +12,32 @@ export type PatchPreviewState = {
   diff: string;
   note?: string;
   line?: number;
-  updatedContent?: string; // ✅ NEW
+  updatedContent?: string; // ✅
 };
 
 type Props = {
   value: PatchPreviewState;
   onChange: (next: PatchPreviewState) => void;
   onOpenFile: (file: string, line?: number) => void;
-  onPreviewPatch: (file: string, updatedContent: string, line?: number) => void; // ✅ NEW
+  onPreviewPatch: (file: string, updatedContent: string, line?: number) => void; // ✅
 };
 
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+}
+
 export function PatchPreviewDialog({ value, onChange, onOpenFile, onPreviewPatch }: Props) {
-  const [copyState, setCopyState] = useState<"idle" | "ok" | "err">("idle");
+  const [copied, setCopied] = useState(false);
+  const copyTimer = useRef<number | null>(null);
 
   const filename = useMemo(() => {
     const safe = (value.file || "patch").replace(/[\/\\]/g, "_");
@@ -30,18 +46,13 @@ export function PatchPreviewDialog({ value, onChange, onOpenFile, onPreviewPatch
 
   function close() {
     onChange({ ...value, open: false });
-    setCopyState("idle");
   }
 
   async function copyDiff() {
-    try {
-      await navigator.clipboard.writeText(value.diff || "");
-      setCopyState("ok");
-      setTimeout(() => setCopyState("idle"), 1200);
-    } catch {
-      setCopyState("err");
-      setTimeout(() => setCopyState("idle"), 1600);
-    }
+    await copyToClipboard(value.diff || "");
+    setCopied(true);
+    if (copyTimer.current) window.clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(() => setCopied(false), 1200);
   }
 
   function downloadDiff() {
@@ -62,7 +73,7 @@ export function PatchPreviewDialog({ value, onChange, onOpenFile, onPreviewPatch
     close();
   }
 
-  function previewPatch() {
+  function applyPreview() {
     const content = (value.updatedContent ?? "").trim();
     if (!content) return;
     onPreviewPatch(value.file, content, value.line);
@@ -73,44 +84,79 @@ export function PatchPreviewDialog({ value, onChange, onOpenFile, onPreviewPatch
 
   return (
     <Dialog open={value.open} onOpenChange={(open) => onChange({ ...value, open })}>
-      <DialogContent className="max-w-4xl">
-        <DialogHeader>
-          <DialogTitle>Diff preview</DialogTitle>
-        </DialogHeader>
+      <DialogContent className="p-0 w-[95vw] max-w-5xl h-[88vh] overflow-hidden">
+        {/* Header */}
+        <div className="px-4 py-3 border-b bg-background/80 backdrop-blur">
+          <div className="flex items-start gap-3">
+            <div className="min-w-0">
+              <div className="font-semibold leading-tight">
+                Patch preview{" "}
+                <span className="text-muted-foreground font-mono">
+                  {value.file}
+                  {typeof value.line === "number" ? `:${value.line}` : ""}
+                </span>
+              </div>
+              <div className="text-xs text-muted-foreground mt-1">
+                Unified diff preview (smart hunks). Apply preview to persist it in Explore.
+              </div>
+            </div>
 
-        <div className="space-y-2">
-          <div className="text-sm text-muted-foreground">
-            <span className="font-mono">{value.file}</span>
-            {typeof value.line === "number" ? <span>:{value.line}</span> : null}
+            <div className="flex-1" />
+
+            <Button size="icon" variant="ghost" className="h-8 w-8" onClick={close} title="Close">
+              <X className="h-4 w-4" />
+            </Button>
           </div>
 
-          {value.note ? (
-            <div className="text-xs rounded-md border p-2 text-muted-foreground">
-              {value.note}
-            </div>
-          ) : null}
+          {/* Actions */}
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Badge variant="secondary" className="h-6">
+              Diff
+            </Badge>
 
-          <pre className="max-h-[55vh] overflow-auto rounded-md border p-3 text-xs leading-relaxed whitespace-pre font-mono">
-{value.diff || "(empty diff)"}
-          </pre>
+            {value.note ? (
+              <div className="text-xs text-muted-foreground truncate max-w-[68ch]">
+                {value.note}
+              </div>
+            ) : null}
+
+            <div className="flex-1" />
+
+            <Button size="sm" variant={copied ? "default" : "secondary"} onClick={copyDiff} className="h-8">
+              {copied ? <Check className="h-4 w-4 mr-2" /> : <Copy className="h-4 w-4 mr-2" />}
+              {copied ? "Copied ✓" : "Copy diff"}
+            </Button>
+
+            <Button size="sm" variant="secondary" onClick={downloadDiff} className="h-8">
+              <Download className="h-4 w-4 mr-2" />
+              Download
+            </Button>
+
+            <Button size="sm" onClick={applyPreview} disabled={!canPreview} className="h-8">
+              <Sparkles className="h-4 w-4 mr-2" />
+              Apply preview
+            </Button>
+
+            <Button size="sm" variant="secondary" onClick={openFile} className="h-8">
+              <FileCode2 className="h-4 w-4 mr-2" />
+              Open file
+            </Button>
+          </div>
         </div>
 
-        <DialogFooter className="gap-2 sm:gap-0">
-          <div className="flex w-full flex-col-reverse gap-2 sm:flex-row sm:justify-between">
-            <Button variant="outline" onClick={close}>Close</Button>
+        {/* Body */}
+        <div className="p-4 h-[calc(88vh-112px)] overflow-auto">
+          <pre className="rounded-2xl border bg-muted/10 p-3 text-xs leading-relaxed whitespace-pre font-mono">
+{value.diff || "(empty diff)"}
+          </pre>
 
-            <div className="flex flex-wrap gap-2 justify-end">
-              <Button variant="secondary" onClick={copyDiff}>
-                {copyState === "ok" ? "Copied" : copyState === "err" ? "Copy failed" : "Copy diff"}
-              </Button>
-              <Button variant="secondary" onClick={downloadDiff}>Download diff</Button>
-              <Button variant="secondary" disabled={!canPreview} onClick={previewPatch}>
-                Preview patch
-              </Button>
-              <Button onClick={openFile}>Open file</Button>
+          {!canPreview ? (
+            <div className="mt-3 text-xs text-muted-foreground">
+              Note: <span className="font-medium">updatedContent</span> no viene en este diálogo, así que “Apply preview” estará deshabilitado.
+              (Esto es normal si este componente solo se usa para ver diffs.)
             </div>
-          </div>
-        </DialogFooter>
+          ) : null}
+        </div>
       </DialogContent>
     </Dialog>
   );
