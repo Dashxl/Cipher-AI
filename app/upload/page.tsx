@@ -1,3 +1,4 @@
+//src/app/upload/page.tsx
 "use client";
 
 import { useState } from "react";
@@ -5,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { ThemeToggle } from "@/components/app/theme-toggle";
 
 export default function UploadPage() {
   const router = useRouter();
@@ -47,7 +49,12 @@ export default function UploadPage() {
   }
 
   return (
-    <main className="min-h-screen flex items-center justify-center p-6">
+    <main className="relative min-h-screen flex items-center justify-center p-6 bg-background text-foreground">
+      {/* Theme toggle */}
+      <div className="absolute right-4 top-4">
+        <ThemeToggle />
+      </div>
+
       <Card className="w-full max-w-xl">
         <CardHeader>
           <CardTitle>Analyze a repository</CardTitle>

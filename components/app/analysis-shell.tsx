@@ -1,5 +1,6 @@
+//src/components/app/analysis-shell.tsx
 "use client";
-
+import { KeyRound } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -325,7 +326,9 @@ function toggleTheme() {
             <div className="absolute inset-0 bg-black/45 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-150 motion-reduce:animate-none" onClick={() => setNavOpen(false)} />
             <div className="absolute inset-y-0 left-0 w-[86%] max-w-[360px] bg-background border-r shadow-2xl motion-safe:animate-in motion-safe:slide-in-from-left-6 motion-safe:duration-200 motion-reduce:animate-none">
               <div className="h-14 px-4 flex items-center gap-3 border-b">
-                <div className="h-9 w-9 rounded-xl border bg-gradient-to-br from-violet-500/20 to-cyan-400/10" />
+                <div className="h-9 w-9 rounded-xl border bg-gradient-to-br from-violet-500/20 to-cyan-400/10 flex items-center justify-center">
+                  <KeyRound className="h-4 w-4 text-violet-600/90 dark:text-violet-300/90" aria-hidden="true" />
+                </div>
                 <div className="min-w-0">
                   <div className="text-sm font-semibold leading-none">Cipher AI</div>
                   <div className="text-[11px] text-muted-foreground leading-none mt-1 truncate">{repoName}</div>
