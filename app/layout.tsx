@@ -1,5 +1,6 @@
 //src/app/layout.tsx
 import type { Metadata } from "next";
+import Script from "next/script";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -18,14 +19,42 @@ export const metadata: Metadata = {
   description: "Code archaeology / repo analyzer (Gemini Hackathon)",
 };
 
+const THEME_INIT = `
+(() => {
+  try {
+    const stored = localStorage.getItem("cipher.theme");
+    const prefersDark =
+      window.matchMedia &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches;
+
+    const isDark = stored ? stored === "dark" : !!prefersDark;
+
+    const root = document.documentElement;
+    root.classList.toggle("dark", isDark);
+    root.style.colorScheme = isDark ? "dark" : "light";
+  } catch {}
+})();
+`;
+
 export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* Prevent theme flash + avoid hydration warnings when the class changes */}
+        <Script
+          id="cipher-theme-init"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{ __html: THEME_INIT }}
+        />
+      </head>
+      <body
+        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        suppressHydrationWarning
+      >
         {children}
       </body>
     </html>
