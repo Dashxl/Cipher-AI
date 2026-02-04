@@ -1,9 +1,11 @@
+//src/app/api/analysis/explain/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import JSZip from "jszip";
 import { kvGet, kvSet } from "@/lib/cache/store";
 import { loadZip } from "@/lib/repo/zip-store";
-import { genai } from "@/lib/genai/client";
+import { withRotatingKey } from "@/lib/genai/keyring";
+import { makeGenAI } from "@/lib/genai/rotating-client";
 import { MODELS } from "@/lib/genai/models";
 import { ThinkingLevel } from "@google/genai";
 
@@ -102,16 +104,18 @@ export async function POST(req: Request) {
             code,
           ].join("\n");
 
-    const res = await genai.models.generateContent({
-      model: MODELS.fast,
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      config: {
-        temperature: 0.2,
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      },
+        const res = await withRotatingKey(async (apiKey) => {
+      const genai = makeGenAI(apiKey);
+      return await genai.models.generateContent({
+        model: MODELS.fast,
+              contents: [{ role: "user", parts: [{ text: prompt }] }],
+              config: {
+                temperature: 0.2,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              },
+      });
     });
-
-    const text = res.text ?? "(No text returned)";
+const text = res.text ?? "(No text returned)";
     await kvSet(cacheKey, { text }, TTL);
 
     return NextResponse.json({ text });

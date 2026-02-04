@@ -1,12 +1,14 @@
+//src/app/api/analysis/scan/debt/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import JSZip from "jszip";
 import { kvGet, kvSet } from "@/lib/cache/store";
 import { loadZip } from "@/lib/repo/zip-store";
-import { genai } from "@/lib/genai/client";
 import { MODELS } from "@/lib/genai/models";
 import { ThinkingLevel } from "@google/genai";
 import type { DebtIssue, Severity } from "@/types/scan";
+import { withRotatingKey } from "@/lib/genai/keyring";
+import { makeGenAI } from "@/lib/genai/rotating-client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -98,10 +100,13 @@ async function enrichWithGemini(repoName: string, issues: DebtIssue[]) {
     ),
   ].join("\n");
 
-  const res = await genai.models.generateContent({
+  const res = await withRotatingKey(async (apiKey) => {
+    const genai = makeGenAI(apiKey);
+    return await genai.models.generateContent({
     model: MODELS.fast,
     contents: prompt,
     config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
+  })
   });
 
   const text = res.text ?? "[]";

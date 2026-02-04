@@ -5,14 +5,19 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import {
+  Archive,
   BookOpen,
   Bug,
   ClipboardCopy,
   Download,
   FileCode2,
+  FileDown,
+  FileText,
   LayoutDashboard,
   Menu,
+  Moon,
   Package,
+  Sun,
   ShieldAlert,
   Wrench,
   X,
@@ -26,6 +31,10 @@ export const ShellIcons = {
   Debt: Wrench,
   Docs: BookOpen,
   Export: Download,
+  Md: FileText,
+  Pdf: FileDown,
+  Zip: Archive,
+  Theme: Moon,
 } as const;
 
 export type NavItem = {
@@ -90,8 +99,49 @@ export function AnalysisShell({
   children,
 }: Props) {
   // Drawer nav for ALL screen sizes
-  const [navOpen, setNavOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
+const [navOpen, setNavOpen] = useState(false);
+const [copied, setCopied] = useState(false);
+
+// Theme (light/dark) — persisted
+const [theme, setTheme] = useState<"light" | "dark">("light");
+
+function applyTheme(next: "light" | "dark") {
+  setTheme(next);
+  try {
+    localStorage.setItem("cipher.theme", next);
+  } catch {
+    // ignore
+  }
+  const root = document.documentElement;
+  root.classList.toggle("dark", next === "dark");
+  // Better native form rendering
+  root.style.colorScheme = next;
+}
+
+useEffect(() => {
+  // Initial theme
+  try {
+    const saved = localStorage.getItem("cipher.theme");
+    if (saved === "light" || saved === "dark") {
+      applyTheme(saved);
+      return;
+    }
+  } catch {
+    // ignore
+  }
+
+  const prefersDark =
+    typeof window !== "undefined" &&
+    window.matchMedia &&
+    window.matchMedia("(prefers-color-scheme: dark)").matches;
+
+  applyTheme(prefersDark ? "dark" : "light");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, []);
+
+function toggleTheme() {
+  applyTheme(theme === "dark" ? "light" : "dark");
+}
 
   async function copyId() {
     try {
@@ -104,12 +154,19 @@ export function AnalysisShell({
   }
 
   const exportButtons = useMemo(() => {
-    const items: Array<{ id: string; label: string; onClick?: () => void; enabled: boolean }> = [
-      { id: "md", label: "MD", onClick: onExportMd, enabled: typeof onExportMd === "function" },
-      { id: "pdf", label: "PDF", onClick: onExportPdf, enabled: typeof onExportPdf === "function" },
+    const items: Array<{
+      id: string;
+      label: string;
+      icon: any;
+      onClick?: () => void;
+      enabled: boolean;
+    }> = [
+      { id: "md", label: "Markdown", icon: FileText, onClick: onExportMd, enabled: typeof onExportMd === "function" },
+      { id: "pdf", label: "PDF", icon: FileDown, onClick: onExportPdf, enabled: typeof onExportPdf === "function" },
       {
         id: "zip",
-        label: "ZIP",
+        label: "Patched ZIP",
+        icon: Archive,
         onClick: onExportZip,
         enabled: !!exportZipEnabled && typeof onExportZip === "function",
       },
@@ -182,6 +239,17 @@ export function AnalysisShell({
 
               <div className="flex-1" />
 
+
+<Button
+  variant="ghost"
+  size="icon"
+  className="h-9 w-9"
+  onClick={toggleTheme}
+  title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+>
+  {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+</Button>
+
               <Button
                 size="sm"
                 className="h-8"
@@ -194,33 +262,40 @@ export function AnalysisShell({
               </Button>
 
               <div className="hidden sm:flex items-center gap-2">
-                {exportButtons.map((b) => (
-                  <Button
-                    key={b.id}
-                    size="sm"
-                    variant="secondary"
-                    className="h-8"
-                    onClick={b.onClick}
-                    title={`Export ${b.label}`}
-                  >
-                    Export {b.label}
-                  </Button>
-                ))}
+                {exportButtons.map((b) => {
+                  const Icon = b.icon ?? Download;
+                  return (
+                    <Button
+                      key={b.id}
+                      size="sm"
+                      variant="secondary"
+                      className="h-8"
+                      onClick={b.onClick}
+                      title={`Export ${b.label}`}
+                    >
+                      <Icon className="h-4 w-4" />
+                      <span className="ml-2">Export {b.label}</span>
+                    </Button>
+                  );
+                })}
               </div>
 
               <div className="sm:hidden flex items-center gap-2">
-                {exportButtons.map((b) => (
-                  <Button
-                    key={b.id}
-                    size="icon"
-                    variant="secondary"
-                    className="h-8 w-8"
-                    onClick={b.onClick}
-                    title={`Export ${b.label}`}
-                  >
-                    <Download className="h-4 w-4" />
-                  </Button>
-                ))}
+                {exportButtons.map((b) => {
+                  const Icon = b.icon ?? Download;
+                  return (
+                    <Button
+                      key={b.id}
+                      size="icon"
+                      variant="secondary"
+                      className="h-8 w-8"
+                      onClick={b.onClick}
+                      title={`Export ${b.label}`}
+                    >
+                      <Icon className="h-4 w-4" />
+                    </Button>
+                  );
+                })}
               </div>
             </div>
 
@@ -247,8 +322,8 @@ export function AnalysisShell({
         {/* Drawer navigation (ALL sizes) */}
         {navOpen ? (
           <div className="fixed inset-0 z-50">
-            <div className="absolute inset-0 bg-black/45" onClick={() => setNavOpen(false)} />
-            <div className="absolute inset-y-0 left-0 w-[86%] max-w-[360px] bg-background border-r shadow-2xl">
+            <div className="absolute inset-0 bg-black/45 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-150 motion-reduce:animate-none" onClick={() => setNavOpen(false)} />
+            <div className="absolute inset-y-0 left-0 w-[86%] max-w-[360px] bg-background border-r shadow-2xl motion-safe:animate-in motion-safe:slide-in-from-left-6 motion-safe:duration-200 motion-reduce:animate-none">
               <div className="h-14 px-4 flex items-center gap-3 border-b">
                 <div className="h-9 w-9 rounded-xl border bg-gradient-to-br from-violet-500/20 to-cyan-400/10" />
                 <div className="min-w-0">
@@ -292,6 +367,16 @@ export function AnalysisShell({
             </div>
           </div>
         ) : null}
+
+        {actionMsg ? (
+          <div className="pointer-events-none fixed bottom-4 right-4 z-[60]">
+            <div className="pointer-events-auto rounded-2xl border bg-background/90 backdrop-blur px-3 py-2 shadow-lg text-xs flex items-center gap-2 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 motion-safe:duration-200 motion-reduce:animate-none">
+              <span className="h-2 w-2 rounded-full bg-primary/70" />
+              <span className="text-foreground">{actionMsg}</span>
+            </div>
+          </div>
+        ) : null}
+
       </div>
     </div>
   );
@@ -305,7 +390,7 @@ function NavButton({ item, onSelect }: { item: NavItem; onSelect: () => void }) 
     <button
       onClick={onSelect}
       className={[
-        "w-full rounded-xl transition px-3 py-2 text-left flex items-center gap-2",
+        "w-full rounded-xl px-3 py-2 text-left flex items-center gap-2 motion-safe:transition-colors motion-safe:transition-transform duration-150 active:scale-[0.99]",
         "focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
         isActive ? "bg-muted/50" : "hover:bg-muted/30",
         item.secondary ? "opacity-85" : "",

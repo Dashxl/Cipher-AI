@@ -2,13 +2,14 @@
 import { NextResponse } from "next/server";
 import JSZip from "jszip";
 import { z } from "zod";
-import { genai } from "@/lib/genai/client";
 import { MODELS } from "@/lib/genai/models";
 import { kvSet } from "@/lib/cache/store";
 import type { AnalysisResult, AnalysisStatus } from "@/types/analysis";
 import { ThinkingLevel } from "@google/genai";
 import { env } from "@/lib/env";
 import { saveZip } from "@/lib/repo/zip-store";
+import { withRotatingKey } from "@/lib/genai/keyring";
+import { makeGenAI } from "@/lib/genai/rotating-client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -137,10 +138,13 @@ function isQuotaError(err: unknown) {
 }
 
 async function callGemini(model: string, prompt: string) {
-  const res = await genai.models.generateContent({
+  const res = await withRotatingKey(async (apiKey) => {
+    const genai = makeGenAI(apiKey);
+    return await genai.models.generateContent({
     model,
     contents: prompt,
     config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
+  })
   });
   return res.text ?? "";
 }

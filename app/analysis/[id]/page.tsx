@@ -4,12 +4,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import type { AnalysisStatus } from "@/types/analysis";
 import type { DebtIssue, VulnFinding, Severity, DepCveFinding } from "@/types/scan";
-
+import { FileText, FileDown, Archive } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 
-import { MermaidView } from "@/components/app/mermaid-view";
+import MermaidView from "@/components/app/mermaid-view";
 import { AnalysisShell, ShellIcons } from "@/components/app/analysis-shell";
 
 import Editor, { DiffEditor } from "@monaco-editor/react";
@@ -129,6 +129,18 @@ export default function AnalysisPage() {
 
   const [status, setStatus] = useState<AnalysisStatus | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
+
+  // Track app theme (html.dark) so Monaco matches the Dark Mode toggle
+  const [isDark, setIsDark] = useState(false);
+  useEffect(() => {
+    const root = document.documentElement;
+    const sync = () => setIsDark(root.classList.contains("dark"));
+    sync();
+    const obs = new MutationObserver(sync);
+    obs.observe(root, { attributes: true, attributeFilter: ["class"] });
+    return () => obs.disconnect();
+  }, []);
+
   const [serverPatches, setServerPatches] = useState<{
     patchedCount: number;
     updatedAt: string | null;
@@ -205,6 +217,7 @@ export default function AnalysisPage() {
   const [copiedOk, setCopiedOk] = useState(false);
   const [downloadOk, setDownloadOk] = useState(false);
   const [actionMsg, setActionMsg] = useState<string>("");
+  const [copiedMermaid, setCopiedMermaid] = useState(false);
 
   const copyTimer = useRef<number | null>(null);
   const downloadTimer = useRef<number | null>(null);
@@ -1007,6 +1020,11 @@ const patchedCountAny = useMemo(
 
   const repoHighPlusTotal = repoCountsAll.CRITICAL + repoCountsAll.HIGH;
 
+  const vulnsHighPlusTotal = useMemo(() => vulns.filter((v) => isHighPlus(v.severity)).length, [vulns]);
+  const depsHighPlusTotal = useMemo(() => deps.filter((d) => isHighPlus(d.severity)).length, [deps]);
+  const debtHighPlusTotal = useMemo(() => debt.filter((d) => isHighPlus(d.severity)).length, [debt]);
+
+
   const visibleVulns = useMemo(() => {
     const s = vulnSearch.trim().toLowerCase();
     const list = [...vulns]
@@ -1182,10 +1200,10 @@ const patchedCountAny = useMemo(
       {
         title: "Export",
         items: [
-          { id: "export-md", label: "Export Markdown", icon: ShellIcons.Export, secondary: true, onClick: exportMd },
-          { id: "export-pdf", label: "Export PDF", icon: ShellIcons.Export, secondary: true, onClick: exportPdf },
+          { id: "export-md", label: "Markdown (.md)", icon: FileText, secondary: true, onClick: exportMd },
+          { id: "export-pdf", label: "PDF (.pdf)", icon: FileDown, secondary: true, onClick: exportPdf },
           ...(patchedCountAny > 0
-            ? [{ id: "export-zip", label: "Export patched ZIP", icon: ShellIcons.Export, secondary: true, onClick: exportPatchedZip }]
+            ? [{ id: "export-zip", label: "Patched ZIP (modified files)", icon: Archive, secondary: true, onClick: exportPatchedZip }]
             : []),
         ],
       },
@@ -1296,35 +1314,49 @@ const patchedCountAny = useMemo(
                 {status.error}
               </pre>
             ) : null}
+          {tab !== "overview" ? (
+              <div className="mt-4 pt-3 border-t">
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTab("overview");
+                      setDepsOpen(false);
+                    }}
+                    className="hover:text-foreground transition"
+                  >
+                    Overview
+                  </button>
+                  <span aria-hidden className="opacity-60">
+                    {">"}
+                  </span>
+                  <span className="text-foreground font-medium">{breadcrumbCurrent}</span>
+                </div>
+              </div>
+            ) : null}
           </div>
         </section>
 
-        {tab !== "overview" ? (
-          <div className="px-1">
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <button
-                type="button"
-                onClick={() => {
-                  setTab("overview");
-                  setDepsOpen(false);
-                }}
-                className="hover:text-foreground transition"
-              >
-                Overview
-              </button>
-              <span aria-hidden className="opacity-60">
-                {">"}
-              </span>
-              <span className="text-foreground font-medium">{breadcrumbCurrent}</span>
-            </div>
-          </div>
-        ) : null}
 
         {/* Tab content */}
         {tab === "overview" && (
           <section className="space-y-6">
             {status.result ? (
               <>
+
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <MiniStatCard title="Vulnerabilities" total={vulns.length} highPlus={vulnsHighPlusTotal} foot="Code findings" />
+                  <MiniStatCard title="Dependency CVEs" total={deps.length} highPlus={depsHighPlusTotal} foot="Third-party risk" />
+                  <MiniStatCard title="Tech Debt" total={debt.length} highPlus={debtHighPlusTotal} foot="Maintainability" />
+                  <MiniStatCard
+                    title="Patched previews"
+                    total={patchedCountAny}
+                    highPlus={repoHighPlusTotal}
+                    pillLabel="High+ total"
+                    foot={patchedCountAny > 0 ? "Ready to export Patched ZIP" : "Apply previews to enable ZIP export"}
+                  />
+                </div>
+
                 <div className="rounded-2xl border bg-card/70 shadow-sm">
                   <div className="p-4 md:p-5 flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -1336,21 +1368,25 @@ const patchedCountAny = useMemo(
 
                     <div className="flex items-center gap-2">
                       <Button
-                        size="sm"
-                        variant="secondary"
-                        className="h-8"
-                        onClick={async () => {
-                          await copyToClipboard(String(status.result?.mermaid ?? ""));
-                          flashMsg("Copied mermaid ✅");
-                        }}
-                      >
-                        Copy mermaid
-                      </Button>
+                          size="sm"
+                          variant="secondary"
+                          className="h-8"
+                          disabled={!String(status.result?.mermaid ?? "").trim()}
+                          onClick={async () => {
+                            const mermaidSrc = String(status.result?.mermaid ?? "");
+                            await copyToClipboard(mermaidSrc);
+                            setCopiedMermaid(true);
+                            flashMsg("Copied mermaid ✅");
+                            setTimeout(() => setCopiedMermaid(false), 1000);
+                          }}
+                        >
+                          {copiedMermaid ? "Copied ✔" : "Copy mermaid"}
+                        </Button>
                     </div>
                   </div>
 
                   <div className="px-4 md:px-5 pb-5">
-                    <MermaidView chart={status.result.mermaid} />
+                    <MermaidView code={status.result.mermaid} controls />
                   </div>
                 </div>
 
@@ -1560,6 +1596,7 @@ const patchedCountAny = useMemo(
 
                 <div className="rounded-2xl border overflow-hidden bg-background/50">
                   <Editor
+                    theme={isDark ? "vs-dark" : "light"}
                     height="420px"
                     language={guessLanguage(selected)}
                     value={fileLoading ? "Loading…" : code}
@@ -1593,7 +1630,7 @@ const patchedCountAny = useMemo(
                         Copy
                       </Button>
                     </div>
-                    <pre className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{explain}</pre>
+                    <div className="mt-3 whitespace-pre-wrap text-sm leading-relaxed tracking-[-0.01em] text-foreground/80 cipher-reader">{explain}</div>
                   </div>
                 ) : null}
               </div>
@@ -2423,6 +2460,7 @@ ${d.suggestion}`,
                 {patchView === "compare" ? (
                   <div className="h-full rounded-2xl border overflow-hidden bg-background/50">
                     <DiffEditor
+                      theme={isDark ? "vs-dark" : "light"}
                       height="100%"
                       language={guessLanguage(patch.file)}
                       original={patch.original}
@@ -2441,6 +2479,7 @@ ${d.suggestion}`,
                 {patchView === "updated" ? (
                   <div className="h-full rounded-2xl border overflow-hidden bg-background/50">
                     <Editor
+                      theme={isDark ? "vs-dark" : "light"}
                       height="100%"
                       language={guessLanguage(patch.file)}
                       value={patch.updated}
@@ -2484,6 +2523,41 @@ function DocList({ label, items }: { label: string; items?: string[] }) {
     </div>
   );
 }
+
+
+function MiniStatCard({
+  title,
+  total,
+  highPlus,
+  pillLabel = "High+",
+  foot,
+}: {
+  title: string;
+  total: number;
+  highPlus?: number;
+  pillLabel?: string;
+  foot?: string;
+}) {
+  return (
+    <div className="rounded-2xl border bg-card/70 shadow-sm">
+      <div className="p-4 md:p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-xs text-muted-foreground">{title}</div>
+            <div className="mt-1 text-2xl font-semibold tabular-nums">{total}</div>
+          </div>
+          {typeof highPlus === "number" ? (
+            <span className="text-xs rounded-full px-2 py-1 border bg-muted/20">
+              {pillLabel} <span className="font-semibold tabular-nums">{highPlus}</span>
+            </span>
+          ) : null}
+        </div>
+        {foot ? <div className="mt-2 text-xs text-muted-foreground">{foot}</div> : null}
+      </div>
+    </div>
+  );
+}
+
 
 function SeverityChip({ s, n }: { s: Severity; n: number }) {
   return (

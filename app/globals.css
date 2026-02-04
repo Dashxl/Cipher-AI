@@ -337,3 +337,25 @@
 
 .cipher-desktop-sidebar { display: flex !important; }
 @media (max-width: 767px) { .cipher-desktop-sidebar { display: none !important; } }
+
+/* ✅ Mermaid (Cipher)
+   Theming is handled inside MermaidView via Mermaid themeVariables.
+   Keep only responsive guardrails here (avoid global SVG overrides that “wash” diagrams).
+*/
+.cipher-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Avoid white label boxes for edge labels */
+.cipher-mermaid .edgeLabel,
+.cipher-mermaid .label {
+  background: transparent !important;
+}
+
+
+/* Reader typography for AI explanations (no monospace) */
+.cipher-reader{
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  line-height: 1.7;
+}

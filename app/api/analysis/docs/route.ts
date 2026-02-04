@@ -1,10 +1,12 @@
+//src/app/api/analysis/docs/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import JSZip from "jszip";
 import { createHash } from "crypto";
 import { kvGet, kvSet } from "@/lib/cache/store";
 import { loadZip } from "@/lib/repo/zip-store";
-import { genai } from "@/lib/genai/client";
+import { withRotatingKey } from "@/lib/genai/keyring";
+import { makeGenAI } from "@/lib/genai/rotating-client";
 import { MODELS } from "@/lib/genai/models";
 import { ThinkingLevel } from "@google/genai";
 
@@ -147,17 +149,20 @@ async function generateDocWithGemini(meta: RepoMeta, path: string, content: stri
   ].join("\n");
 
   // ✅ FIX: contents tipado correcto + config correcto (NO generationConfig)
-  const resp = await genai.models.generateContent({
-    model: MODELS.fast,
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    config: {
-      responseMimeType: "application/json",
-      temperature: 0.2,
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-    },
-  });
+// ✅ Rotation: if a key is rate-limited/quota-exhausted, automatically retry with the next key.
+  const resp = await withRotatingKey(async (apiKey) => {
+    const genai = makeGenAI(apiKey);
 
-  const parsed = safeJsonParse(resp.text ?? "");
+    return await genai.models.generateContent({
+      model: MODELS.fast,
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: "application/json",
+        temperature: 0.2,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      },
+    });
+  });const parsed = safeJsonParse(resp.text ?? "");
 
   return {
     path,
@@ -231,7 +236,7 @@ export async function POST(req: Request) {
     await kvSet(docKey, doc, TTL);
 
     return NextResponse.json({ doc });
-    } catch (err: any) {
+  } catch (err: any) {
     const msg = String(err?.message ?? "Docs failed");
     const lower = msg.toLowerCase();
     const isQuota =
@@ -254,5 +259,4 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ error: msg }, { status: 500 });
   }
-
 }
