@@ -80,7 +80,7 @@ export default function UploadPage() {
               {loading ? "Analyzing…" : "Analyze GitHub repo with Gemini 3"}
             </Button>
             <p className="text-sm text-muted-foreground">
-              Public repos work without a token. For private repos, set GITHUB_TOKEN in .env.local.
+              Only URLs from public repos.
             </p>
           </div>
         </CardContent>
