@@ -72,7 +72,7 @@ function friendlyError(res: Response, data: any) {
   const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? `${retryAfter}s` : "30–60s";
 
   if (isRateLimit(res, data)) {
-    return `Rate limit de Gemini. Intenta de nuevo en ${wait}. (Tip: en Docs usa maxFiles=5)`;
+    return `Rate limit Gemini. Try again in ${wait}.`;
   }
   return String(data?.error ?? `Request failed (${res.status})`);
 }

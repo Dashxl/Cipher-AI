@@ -1,9 +1,14 @@
-//src/app/api/analysis/scan/debt/route.ts
+//src/app/api/analysis/scan/vuln/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import JSZip from "jszip";
 import { kvGet, kvSet } from "@/lib/cache/store";
-import { loadZip } from "@/lib/repo/zip-store";
+import {
+  loadZip,
+  ZipNotReadyError,
+  ZipCorruptError,
+  ZipChunkMissingError,
+} from "@/lib/repo/zip-store";
 import { MODELS } from "@/lib/genai/models";
 import { ThinkingLevel } from "@google/genai";
 import type { VulnFinding, Severity } from "@/types/scan";
@@ -39,7 +44,6 @@ function mkId(file: string, line: number, type: string) {
 }
 
 function getLineNumber(text: string, index: number) {
-  // count '\n' up to index
   let n = 1;
   for (let i = 0; i < index && i < text.length; i++) if (text.charCodeAt(i) === 10) n++;
   return n;
@@ -118,7 +122,6 @@ const RULES: Array<{
 ];
 
 async function enrichWithGemini(repoName: string, findings: VulnFinding[]) {
-  // Enrich top findings only (keep cost down)
   const top = findings.slice(0, 12);
 
   const prompt = [
@@ -144,10 +147,10 @@ async function enrichWithGemini(repoName: string, findings: VulnFinding[]) {
   const res = await withRotatingKey(async (apiKey) => {
     const genai = makeGenAI(apiKey);
     return await genai.models.generateContent({
-    model: MODELS.fast, // Gemini 3 Flash
-    contents: prompt,
-    config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
-  })
+      model: MODELS.fast,
+      contents: prompt,
+      config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
+    });
   });
 
   const text = res.text ?? "[]";
@@ -178,24 +181,74 @@ export async function POST(req: Request) {
   const meta = await kvGet<RepoMeta>(`repo:${body.analysisId}`);
   if (!meta) return NextResponse.json({ error: "Repo not found" }, { status: 404 });
 
-  const zipBuf = await loadZip(body.analysisId);
-  const zip = await JSZip.loadAsync(zipBuf);
+  let zipBuf: Buffer;
+  try {
+    zipBuf = await loadZip(body.analysisId);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+
+    if (e instanceof ZipNotReadyError || e instanceof ZipChunkMissingError) {
+      console.error("[scan:vuln] zip not ready", { id: body.analysisId, msg });
+      return NextResponse.json(
+        { error: "Analysis zip not ready or expired. Re-run analysis.", code: (e as any).code },
+        { status: 410 }
+      );
+    }
+
+    if (e instanceof ZipCorruptError) {
+      console.error("[scan:vuln] zip corrupt", { id: body.analysisId, msg });
+      return NextResponse.json(
+        { error: "Analysis zip is corrupt. Re-run analysis.", code: "ZIP_CORRUPT" },
+        { status: 500 }
+      );
+    }
+
+    console.error("[scan:vuln] zip load failed", { id: body.analysisId, msg });
+    return NextResponse.json(
+      { error: "Failed to load analysis zip", code: "ZIP_LOAD_FAILED" },
+      { status: 500 }
+    );
+  }
+
+  let zip: JSZip;
+  try {
+    zip = await JSZip.loadAsync(zipBuf);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[scan:vuln] JSZip.loadAsync failed", { id: body.analysisId, msg });
+    return NextResponse.json(
+      { error: "Failed to parse zip (corrupt). Re-run analysis.", code: "ZIP_PARSE_FAILED" },
+      { status: 500 }
+    );
+  }
 
   const files = (meta.files ?? []).slice(0, body.maxFiles);
 
   const findings: VulnFinding[] = [];
+
+  let readableFiles = 0;
+  let emptyFiles = 0;
 
   for (const file of files) {
     const actualPath = meta.root ? `${meta.root}/${file}` : file;
     const f = zip.file(actualPath);
     if (!f) continue;
 
-    const content = (await f.async("string")).slice(0, 200_000);
+    const raw = await f.async("string");
+    const content = raw.slice(0, 200_000);
+
+    if (content.trim().length === 0) {
+      emptyFiles++;
+      continue; // NO correr reglas ni Gemini sobre vacío
+    }
+
+    readableFiles++;
     const lines = content.split("\n");
 
     for (const rule of RULES) {
       rule.pattern.lastIndex = 0;
       let m: RegExpExecArray | null;
+
       while ((m = rule.pattern.exec(content))) {
         const idx = m.index ?? 0;
         const line = getLineNumber(content, idx);
@@ -220,11 +273,21 @@ export async function POST(req: Request) {
     if (findings.length >= body.maxFindings) break;
   }
 
+  if (readableFiles === 0 && files.length > 0) {
+    return NextResponse.json(
+      {
+        error: "No readable text files found to scan. The analysis zip may be corrupt/expired.",
+        code: "NO_READABLE_FILES",
+        stats: { attempted: files.length, emptyFiles },
+      },
+      { status: 422 }
+    );
+  }
+
   findings.sort((a, b) => sevRank(a.severity) - sevRank(b.severity));
 
   let note: string | undefined;
 
-  // Enrich with Gemini (best effort)
   try {
     await enrichWithGemini(meta.repoName, findings);
   } catch (err) {
@@ -234,8 +297,14 @@ export async function POST(req: Request) {
       : `Gemini enrichment failed: ${msg}`;
   }
 
+  if (emptyFiles > 0) {
+    note = note
+      ? `${note} (Skipped ${emptyFiles} empty files.)`
+      : `Skipped ${emptyFiles} empty files.`;
+  }
+
   const payload = { findings, note };
-  await kvSet(cacheKey, payload, 60 * 30); // 30 min
+  await kvSet(cacheKey, payload, 60 * 30);
 
   return NextResponse.json(payload);
 }

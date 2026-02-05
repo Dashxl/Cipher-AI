@@ -1,9 +1,14 @@
-//src/app/api/analysis/scan/debt/route.ts
+// src/app/api/analysis/scan/debt/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import JSZip from "jszip";
 import { kvGet, kvSet } from "@/lib/cache/store";
-import { loadZip } from "@/lib/repo/zip-store";
+import {
+  loadZip,
+  ZipNotReadyError,
+  ZipCorruptError,
+  ZipChunkMissingError,
+} from "@/lib/repo/zip-store";
 import { MODELS } from "@/lib/genai/models";
 import { ThinkingLevel } from "@google/genai";
 import type { DebtIssue, Severity } from "@/types/scan";
@@ -103,10 +108,10 @@ async function enrichWithGemini(repoName: string, issues: DebtIssue[]) {
   const res = await withRotatingKey(async (apiKey) => {
     const genai = makeGenAI(apiKey);
     return await genai.models.generateContent({
-    model: MODELS.fast,
-    contents: prompt,
-    config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
-  })
+      model: MODELS.fast,
+      contents: prompt,
+      config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
+    });
   });
 
   const text = res.text ?? "[]";
@@ -137,13 +142,54 @@ export async function POST(req: Request) {
   const meta = await kvGet<RepoMeta>(`repo:${body.analysisId}`);
   if (!meta) return NextResponse.json({ error: "Repo not found" }, { status: 404 });
 
-  const zipBuf = await loadZip(body.analysisId);
-  const zip = await JSZip.loadAsync(zipBuf);
+  let zipBuf: Buffer;
+  try {
+    zipBuf = await loadZip(body.analysisId);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+
+    if (e instanceof ZipNotReadyError || e instanceof ZipChunkMissingError) {
+      console.error("[scan:debt] zip not ready", { id: body.analysisId, msg });
+      return NextResponse.json(
+        { error: "Analysis zip not ready or expired. Re-run analysis.", code: (e as any).code },
+        { status: 410 }
+      );
+    }
+
+    if (e instanceof ZipCorruptError) {
+      console.error("[scan:debt] zip corrupt", { id: body.analysisId, msg });
+      return NextResponse.json(
+        { error: "Analysis zip is corrupt. Re-run analysis.", code: "ZIP_CORRUPT" },
+        { status: 500 }
+      );
+    }
+
+    console.error("[scan:debt] zip load failed", { id: body.analysisId, msg });
+    return NextResponse.json(
+      { error: "Failed to load analysis zip", code: "ZIP_LOAD_FAILED" },
+      { status: 500 }
+    );
+  }
+
+  let zip: JSZip;
+  try {
+    zip = await JSZip.loadAsync(zipBuf);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[scan:debt] JSZip.loadAsync failed", { id: body.analysisId, msg });
+    return NextResponse.json(
+      { error: "Failed to parse zip (corrupt). Re-run analysis.", code: "ZIP_PARSE_FAILED" },
+      { status: 500 }
+    );
+  }
 
   const files = (meta.files ?? []).slice(0, body.maxFiles);
 
   const issues: DebtIssue[] = [];
   const dupIndex = new Map<string, Array<{ file: string; line: number }>>();
+
+  let readableFiles = 0;
+  let emptyFiles = 0;
 
   // 1) Build duplicate index (fast-ish)
   for (const file of files) {
@@ -152,6 +198,12 @@ export async function POST(req: Request) {
     if (!f) continue;
 
     const content = (await f.async("string")).slice(0, 220_000);
+    if (content.trim().length === 0) {
+      emptyFiles++;
+      continue;
+    }
+
+    readableFiles++;
     const lines = content.split("\n");
 
     for (const h of windowHashes(lines, 8)) {
@@ -168,6 +220,8 @@ export async function POST(req: Request) {
     if (!f) continue;
 
     const content = (await f.async("string")).slice(0, 220_000);
+    if (content.trim().length === 0) continue; // no issues from empty
+
     const lines = content.split("\n");
 
     // Large file
@@ -217,6 +271,17 @@ export async function POST(req: Request) {
     if (issues.length >= body.maxIssues) break;
   }
 
+  if (readableFiles === 0 && files.length > 0) {
+    return NextResponse.json(
+      {
+        error: "No readable text files found to scan. The analysis zip may be corrupt/expired.",
+        code: "NO_READABLE_FILES",
+        stats: { attempted: files.length, emptyFiles },
+      },
+      { status: 422 }
+    );
+  }
+
   // 3) Duplicate code issues (only strongest)
   const dupCandidates: DebtIssue[] = [];
   for (const [key, occ] of dupIndex.entries()) {
@@ -248,6 +313,10 @@ export async function POST(req: Request) {
     note = isQuota(msg)
       ? "Gemini quota exhausted: returning heuristic-only results."
       : `Gemini enrichment failed: ${msg}`;
+  }
+
+  if (emptyFiles > 0) {
+    note = note ? `${note} (Skipped ${emptyFiles} empty files.)` : `Skipped ${emptyFiles} empty files.`;
   }
 
   const payload = { issues: merged, note };

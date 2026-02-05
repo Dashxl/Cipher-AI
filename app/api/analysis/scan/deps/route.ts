@@ -1,14 +1,21 @@
+// src/app/api/analysis/scan/deps/route.ts
 import JSZip from "jszip";
 import type { DepCveFinding, Severity } from "@/types/scan";
 import { kvGet, kvSet } from "@/lib/cache/store";
-import { loadZip } from "@/lib/repo/zip-store";
+import {
+  loadZip,
+  ZipNotReadyError,
+  ZipCorruptError,
+  ZipChunkMissingError,
+} from "@/lib/repo/zip-store";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 type Dep = { ecosystem: "npm" | "PyPI"; name: string; version: string; source: string };
 
 const DEFAULT_MAX_DEPS = 450;
-const CACHE_TTL_SECONDS = 60 * 30; // 30 min (ajústalo si quieres)
+const CACHE_TTL_SECONDS = 60 * 30; // 30 min
 
 export async function POST(req: Request) {
   try {
@@ -22,14 +29,45 @@ export async function POST(req: Request) {
     const cached = await kvGet<any>(cacheKey);
     if (cached) return Response.json(cached);
 
-    const zipBytes = await loadZip(analysisId);
-    if (!zipBytes) {
-      return Response.json({ error: "Missing ZIP for analysisId. Re-run analysis/start." }, { status: 400 });
+    let zipBytes: Buffer;
+    try {
+      zipBytes = await loadZip(analysisId);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+
+      if (e instanceof ZipNotReadyError || e instanceof ZipChunkMissingError) {
+        console.error("[scan:deps] zip not ready", { id: analysisId, msg });
+        return Response.json(
+          { error: "Analysis zip not ready or expired. Re-run analysis.", code: (e as any).code },
+          { status: 410 }
+        );
+      }
+
+      if (e instanceof ZipCorruptError) {
+        console.error("[scan:deps] zip corrupt", { id: analysisId, msg });
+        return Response.json(
+          { error: "Analysis zip is corrupt. Re-run analysis.", code: "ZIP_CORRUPT" },
+          { status: 500 }
+        );
+      }
+
+      console.error("[scan:deps] zip load failed", { id: analysisId, msg });
+      return Response.json({ error: "Failed to load analysis zip", code: "ZIP_LOAD_FAILED" }, { status: 500 });
     }
 
-    const zip = await JSZip.loadAsync(zipBytes as any);
-    const fileNames = Object.keys(zip.files).filter((n) => !zip.files[n].dir);
+    let zip: JSZip;
+    try {
+      zip = await JSZip.loadAsync(zipBytes as any);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[scan:deps] JSZip.loadAsync failed", { id: analysisId, msg });
+      return Response.json(
+        { error: "Failed to parse zip (corrupt). Re-run analysis.", code: "ZIP_PARSE_FAILED" },
+        { status: 500 }
+      );
+    }
 
+    const fileNames = Object.keys(zip.files).filter((n) => !zip.files[n].dir);
     const manifests = pickManifests(fileNames);
 
     if (manifests.length === 0) {
@@ -46,11 +84,21 @@ export async function POST(req: Request) {
     const notes: string[] = [];
     let unpinnedPy = 0;
 
+    let readableManifests = 0;
+    let emptyManifests = 0;
+
     for (const m of manifests) {
       const file = zip.file(m);
       if (!file) continue;
 
       const text = await file.async("string");
+      if (text.trim().length === 0) {
+        emptyManifests++;
+        continue;
+      }
+
+      readableManifests++;
+
       const lower = m.toLowerCase();
 
       if (lower.endsWith("package-lock.json")) {
@@ -74,13 +122,26 @@ export async function POST(req: Request) {
       }
     }
 
+    // If all manifests were empty, abort loudly (don’t silently claim “no deps”)
+    if (readableManifests === 0) {
+      return Response.json(
+        {
+          error: "No readable dependency manifests found (all were empty). The analysis zip may be corrupt/expired.",
+          code: "NO_READABLE_MANIFESTS",
+          stats: { manifests: manifests.length, emptyManifests },
+        },
+        { status: 422 }
+      );
+    }
+
     const unique = uniqDeps(deps);
 
     if (unique.length === 0) {
       const payload = {
         findings: [],
         note:
-          "Dependency manifests found, but no pinned dependencies could be extracted. If using ranges (^, ~, >=), pin exact versions for best CVE accuracy.",
+          "Dependency manifests found, but no pinned dependencies could be extracted. If using ranges (^, ~, >=), pin exact versions for best CVE accuracy." +
+          (emptyManifests ? ` (Skipped ${emptyManifests} empty manifests.)` : ""),
       };
       await kvSet(cacheKey, payload, CACHE_TTL_SECONDS);
       return Response.json(payload);
@@ -94,6 +155,10 @@ export async function POST(req: Request) {
 
     if (unpinnedPy > 0) {
       notes.push(`Skipped ${unpinnedPy} Python deps without exact pins (use == for best accuracy).`);
+    }
+
+    if (emptyManifests > 0) {
+      notes.push(`Skipped ${emptyManifests} empty manifests.`);
     }
 
     const { findings, osvNote } = await queryOsv(scanList);
@@ -121,10 +186,6 @@ function clampInt(v: any, min: number, max: number) {
   const n = Number(v);
   if (!Number.isFinite(n)) return min;
   return Math.max(min, Math.min(max, Math.floor(n)));
-}
-
-function normalizePath(p: string) {
-  return String(p || "").replaceAll("\\", "/");
 }
 
 function pickManifests(files: string[]) {
@@ -163,13 +224,12 @@ function extractFromPackageLock(text: string, source: string): Dep[] {
     const json = JSON.parse(text);
     const out: Dep[] = [];
 
-    // lockfile v2/v3: packages object
     if (json && typeof json === "object" && json.packages && typeof json.packages === "object") {
       for (const k of Object.keys(json.packages)) {
         const node = json.packages[k];
         if (!node || typeof node !== "object") continue;
-        const name = node.name;
-        const version = node.version;
+        const name = (node as any).name;
+        const version = (node as any).version;
         if (typeof name === "string" && typeof version === "string") {
           out.push({ ecosystem: "npm", name, version, source });
         }
@@ -177,9 +237,8 @@ function extractFromPackageLock(text: string, source: string): Dep[] {
       return out;
     }
 
-    // lockfile v1: dependencies tree
-    if (json && typeof json === "object" && json.dependencies && typeof json.dependencies === "object") {
-      walkNpmDeps(json.dependencies, out, source);
+    if (json && typeof json === "object" && (json as any).dependencies && typeof (json as any).dependencies === "object") {
+      walkNpmDeps((json as any).dependencies, out, source);
       return out;
     }
 
@@ -208,7 +267,6 @@ function extractFromYarnLock(text: string, source: string): Dep[] {
   for (let i = 0; i < lines.length; i++) {
     const ln = lines[i];
 
-    // Key line: "pkg@^1.0.0", "pkg@~1.2.0":
     if (!ln.startsWith(" ") && ln.trim().endsWith(":") && ln.includes("@")) {
       const rawKey = ln.trim().replace(/:$/, "");
       const first = rawKey.split(",")[0]?.trim();
@@ -247,7 +305,6 @@ function extractFromPnpmLock(text: string, source: string): Dep[] {
       continue;
     }
 
-    // "  /react@18.2.0:" or "  /@babel/core@7.22.0(...):"
     const m = t.match(/^ {2}\/(.+?):\s*$/);
     if (!m) continue;
 
@@ -319,7 +376,6 @@ function extractFromPyProject(text: string, source: string): { deps: Dep[]; unpi
 
   const t = text.replace(/\r\n/g, "\n");
 
-  // PEP 621: dependencies = ["requests==2.31.0", ...]
   const depArray = t.match(/^\s*dependencies\s*=\s*\[(.|\n)*?\]/m);
   if (depArray) {
     const chunk = depArray[0];
@@ -332,7 +388,6 @@ function extractFromPyProject(text: string, source: string): { deps: Dep[]; unpi
     }
   }
 
-  // Poetry: [tool.poetry.dependencies] name = "1.2.3" (exact-ish)
   const section = t.split(/\n\[\s*tool\.poetry\.dependencies\s*\]\n/i);
   if (section.length > 1) {
     const after = section[1];
@@ -441,7 +496,6 @@ function severityRank(s: Severity) {
 }
 
 function severityFromOsv(v: any): Severity {
-  // OSV often includes: severity: [{type:"CVSS_V3", score:"9.8"}]
   const arr = Array.isArray(v?.severity) ? v.severity : [];
   for (const s of arr) {
     const score = Number(s?.score);

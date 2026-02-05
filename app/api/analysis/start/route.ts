@@ -14,6 +14,9 @@ import { makeGenAI } from "@/lib/genai/rotating-client";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+// ✅ TTL alineado para: analysis status + repo meta + zip/manifest
+const TTL_SECONDS = 60 * 60 * 6; // 6h
+
 /** JSON payload for GitHub URL analysis */
 const JsonBodySchema = z.object({
   githubUrl: z.string().url(),
@@ -94,13 +97,11 @@ function pickKeyFiles(allPaths: string[]) {
   const lowerMap = new Map(allPaths.map((p) => [p.toLowerCase(), p]));
   const chosen: string[] = [];
 
-  // exact name matches
   for (const p of priority) {
     const found = lowerMap.get(p);
     if (found) chosen.push(found);
   }
 
-  // entrypoint hints
   const entryHints = allPaths.filter((p) => {
     const pl = p.toLowerCase();
     return (
@@ -141,10 +142,10 @@ async function callGemini(model: string, prompt: string) {
   const res = await withRotatingKey(async (apiKey) => {
     const genai = makeGenAI(apiKey);
     return await genai.models.generateContent({
-    model,
-    contents: prompt,
-    config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
-  })
+      model,
+      contents: prompt,
+      config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
+    });
   });
   return res.text ?? "";
 }
@@ -176,23 +177,10 @@ async function getDefaultBranch(owner: string, repo: string): Promise<string | n
   }
 }
 
-/**
- * Download a repository ZIP from GitHub via codeload. We try:
- * 1) default branch (from GitHub API) (canary, trunk, etc.)
- * 2) common fallbacks: main/master/canary/develop/...
- */
 async function downloadGitHubZip(owner: string, repo: string): Promise<Buffer> {
   const def = await getDefaultBranch(owner, repo);
 
-  const candidates = [
-    def,
-    "main",
-    "master",
-    "canary",
-    "develop",
-    "dev",
-    "trunk",
-  ].filter(Boolean) as string[];
+  const candidates = [def, "main", "master", "canary", "develop", "dev", "trunk"].filter(Boolean) as string[];
 
   const tried: { branch: string; status: number }[] = [];
   const seen = new Set<string>();
@@ -213,9 +201,7 @@ async function downloadGitHubZip(owner: string, repo: string): Promise<Buffer> {
   }
 
   throw new Error(
-    `Failed to download repo ZIP. Tried branches: ${tried
-      .map((t) => `${t.branch}(${t.status})`)
-      .join(", ")}`
+    `Failed to download repo ZIP. Tried branches: ${tried.map((t) => `${t.branch}(${t.status})`).join(", ")}`
   );
 }
 
@@ -243,14 +229,9 @@ function buildNormalizedPathMap(paths: string[]) {
   return { root, normalizedPaths, normToActual };
 }
 
-async function analyzeZipBuffer(
-  id: string,
-  baseStatus: AnalysisStatus,
-  zipBuf: Buffer,
-  repoName: string
-) {
-  // Persist ZIP for later file view & explain endpoints
-  await saveZip(id, zipBuf);
+async function analyzeZipBuffer(id: string, baseStatus: AnalysisStatus, zipBuf: Buffer, repoName: string) {
+  // ✅ Persist ZIP for later file view & explain endpoints (Upstash chunked, if you replaced zip-store)
+  await saveZip(id, zipBuf, TTL_SECONDS);
 
   const zip = await JSZip.loadAsync(zipBuf);
 
@@ -260,14 +241,17 @@ async function analyzeZipBuffer(
   const textPaths = normalizedPaths.filter(isProbablyText);
   const keyFiles = pickKeyFiles(textPaths);
 
-  // Save metadata for file explorer
-  await kvSet(`repo:${id}`, {
-    repoName,
-    root,
-    files: textPaths.slice(0, 2000),
-  });
+  // ✅ Save metadata for file explorer (same TTL)
+  await kvSet(
+    `repo:${id}`,
+    {
+      repoName,
+      root,
+      files: textPaths.slice(0, 2000),
+    },
+    TTL_SECONDS
+  );
 
-  // Token saving: small tree preview + small snippets
   const treePreview = textPaths.slice(0, 80).join("\n");
 
   const keyFileSnippets: { path: string; content: string }[] = [];
@@ -280,13 +264,17 @@ async function analyzeZipBuffer(
     keyFileSnippets.push({ path: normPath, content: raw.slice(0, 2500) });
   }
 
-  await kvSet(`analysis:${id}`, {
-    ...baseStatus,
-    stage: "calling_gemini",
-    progress: 60,
-    message: "Generating architecture with Gemini 3…",
-    updatedAt: new Date().toISOString(),
-  } satisfies AnalysisStatus);
+  await kvSet(
+    `analysis:${id}`,
+    {
+      ...baseStatus,
+      stage: "calling_gemini",
+      progress: 60,
+      message: "Generating architecture with Gemini 3…",
+      updatedAt: new Date().toISOString(),
+    } satisfies AnalysisStatus,
+    TTL_SECONDS
+  );
 
   const prompt = [
     "You are Cipher AI, a code archaeology tool.",
@@ -324,13 +312,17 @@ async function analyzeZipBuffer(
     if (isQuotaError(err) && MODELS.fast && MODELS.fast !== MODELS.deep) {
       usedModel = MODELS.fast;
 
-      await kvSet(`analysis:${id}`, {
-        ...baseStatus,
-        stage: "calling_gemini",
-        progress: 70,
-        message: "Pro quota exceeded. Falling back to Gemini 3 Flash…",
-        updatedAt: new Date().toISOString(),
-      } satisfies AnalysisStatus);
+      await kvSet(
+        `analysis:${id}`,
+        {
+          ...baseStatus,
+          stage: "calling_gemini",
+          progress: 70,
+          message: "Pro quota exceeded. Falling back to Gemini 3 Flash…",
+          updatedAt: new Date().toISOString(),
+        } satisfies AnalysisStatus,
+        TTL_SECONDS
+      );
 
       rawText = await callGemini(MODELS.fast, prompt);
     } else {
@@ -343,6 +335,7 @@ async function analyzeZipBuffer(
 
   const parsed = ResultSchema.parse(JSON.parse(jsonText)) as AnalysisResult;
 
+  // Keep your existing “model used” hint without adding new fields to the type
   parsed.summary = [`(Model used: ${usedModel})`, ...parsed.summary].slice(0, 10);
 
   const done: AnalysisStatus = {
@@ -360,7 +353,7 @@ async function analyzeZipBuffer(
     },
   };
 
-  await kvSet(`analysis:${id}`, done);
+  await kvSet(`analysis:${id}`, done, TTL_SECONDS);
 }
 
 export async function POST(req: Request) {
@@ -376,7 +369,7 @@ export async function POST(req: Request) {
     updatedAt: now,
   };
 
-  await kvSet(`analysis:${id}`, baseStatus);
+  await kvSet(`analysis:${id}`, baseStatus, TTL_SECONDS);
 
   try {
     const contentType = req.headers.get("content-type") ?? "";
@@ -386,21 +379,29 @@ export async function POST(req: Request) {
       const body = JsonBodySchema.parse(await req.json());
       const { owner, repo } = parseGitHubUrl(body.githubUrl);
 
-      await kvSet(`analysis:${id}`, {
-        ...baseStatus,
-        progress: 20,
-        message: "Downloading GitHub ZIP…",
-        updatedAt: new Date().toISOString(),
-      } satisfies AnalysisStatus);
+      await kvSet(
+        `analysis:${id}`,
+        {
+          ...baseStatus,
+          progress: 20,
+          message: "Downloading GitHub ZIP…",
+          updatedAt: new Date().toISOString(),
+        } satisfies AnalysisStatus,
+        TTL_SECONDS
+      );
 
       const zipBuf = await downloadGitHubZip(owner, repo);
 
-      await kvSet(`analysis:${id}`, {
-        ...baseStatus,
-        progress: 35,
-        message: "Reading ZIP…",
-        updatedAt: new Date().toISOString(),
-      } satisfies AnalysisStatus);
+      await kvSet(
+        `analysis:${id}`,
+        {
+          ...baseStatus,
+          progress: 35,
+          message: "Reading ZIP…",
+          updatedAt: new Date().toISOString(),
+        } satisfies AnalysisStatus,
+        TTL_SECONDS
+      );
 
       await analyzeZipBuffer(id, baseStatus, zipBuf, `${owner}/${repo}`);
       return NextResponse.json({ analysisId: id });
@@ -409,10 +410,12 @@ export async function POST(req: Request) {
     // A) ZIP upload (multipart/form-data)
     if (contentType.includes("multipart/form-data")) {
       const form = await req.formData();
-      const zipFile = form.get("zip");
+
+      // ✅ Back-compat: acepta "zip" (tu original) o "file" (otros flows)
+      const zipFile = (form.get("zip") ?? form.get("file")) as unknown;
 
       if (!(zipFile instanceof File)) {
-        throw new Error("Missing 'zip' file field in form-data.");
+        throw new Error("Missing ZIP file field in form-data (expected 'zip' or 'file').");
       }
 
       const MAX_BYTES = 25 * 1024 * 1024;
@@ -420,12 +423,16 @@ export async function POST(req: Request) {
         throw new Error("ZIP file too large. Please upload a ZIP under 25MB for MVP.");
       }
 
-      await kvSet(`analysis:${id}`, {
-        ...baseStatus,
-        progress: 25,
-        message: "Reading ZIP…",
-        updatedAt: new Date().toISOString(),
-      } satisfies AnalysisStatus);
+      await kvSet(
+        `analysis:${id}`,
+        {
+          ...baseStatus,
+          progress: 25,
+          message: "Reading ZIP…",
+          updatedAt: new Date().toISOString(),
+        } satisfies AnalysisStatus,
+        TTL_SECONDS
+      );
 
       const zipBuf = Buffer.from(await zipFile.arrayBuffer());
       const repoName = zipFile.name.replace(/\.zip$/i, "") || "Uploaded ZIP";
@@ -435,19 +442,23 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json(
-      { analysisId: id, error: "Send either JSON {githubUrl} or multipart/form-data with 'zip'." },
+      { analysisId: id, error: "Send either JSON {githubUrl} or multipart/form-data with 'zip' (or 'file')." },
       { status: 400 }
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    await kvSet(`analysis:${id}`, {
-      ...baseStatus,
-      stage: "error",
-      progress: 100,
-      message: "Error",
-      updatedAt: new Date().toISOString(),
-      error: message,
-    } satisfies AnalysisStatus);
+    await kvSet(
+      `analysis:${id}`,
+      {
+        ...baseStatus,
+        stage: "error",
+        progress: 100,
+        message: "Error",
+        updatedAt: new Date().toISOString(),
+        error: message,
+      } satisfies AnalysisStatus,
+      TTL_SECONDS
+    );
 
     return NextResponse.json({ analysisId: id, error: message }, { status: 500 });
   }
