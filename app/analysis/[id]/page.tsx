@@ -216,30 +216,13 @@ export default function AnalysisPage() {
   const [docsErr, setDocsErr] = useState<string>("");
   const [docsMobileView, setDocsMobileView] = useState<"list" | "detail">("list");
 
-  const [docsIsDesktop, setDocsIsDesktop] = useState(false);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const mq = window.matchMedia("(min-width: 1024px)");
-    const update = () => setDocsIsDesktop(mq.matches);
-    update();
-    // @ts-ignore
-    if (mq.addEventListener) mq.addEventListener("change", update);
-    // @ts-ignore
-    else mq.addListener(update);
-
-    return () => {
-      // @ts-ignore
-      if (mq.removeEventListener) mq.removeEventListener("change", update);
-      // @ts-ignore
-      else mq.removeListener(update);
-    };
-  }, []);
-
   useEffect(() => {
     if (tab !== "docs") return;
-    if (!docsIsDesktop) setDocsMobileView("list");
-  }, [tab, docsIsDesktop]);
+    // On mobile, start with the list view; selecting an item will switch to detail.
+    if (typeof window !== "undefined" && window.innerWidth < 1024) {
+      setDocsMobileView("list");
+    }
+  }, [tab]);
 
 
   // Patch preview modal (in-page)
@@ -812,7 +795,7 @@ const patchedCountAny = useMemo(
 
       // si llegó aquí, falló por 429 múltiples veces
       if (lastRes) {
-        const msg = lastData ? friendlyError(lastRes, lastData) : "Rate limit of Gemini. Try again in 30–60s.";
+        const msg = lastData ? friendlyError(lastRes, lastData) : "Rate limit de Gemini. Intenta en 30–60s.";
         setDocsErr(msg);
       } else {
         setDocsErr("Docs index failed.");
@@ -825,7 +808,7 @@ const patchedCountAny = useMemo(
   async function openDoc(path: string) {
     setDocSelected(path);
     // Mobile: switch to detail view so the doc content doesn’t render below the list.
-    if (!docsIsDesktop) setDocsMobileView("detail");
+    if (typeof window !== "undefined" && window.innerWidth < 1024) setDocsMobileView("detail");
     setDoc(null);
     setDocsErr("");
     setDocsBusy(true);
@@ -2291,7 +2274,7 @@ ${d.suggestion}`,
         {tab === "docs" && (
           <section className="space-y-4">
             {/* Mobile: master/detail so the doc content doesn't render below the list */}
-            <div className={docsIsDesktop ? "hidden" : ""}>
+            <div className="lg:hidden">
               {docsMobileView === "list" ? (
                 <div className="rounded-2xl border bg-card/70 shadow-sm">
                   <div className="p-4 md:p-5 space-y-3">
@@ -2417,7 +2400,7 @@ ${d.suggestion}`,
             </div>
 
             {/* Desktop: split view */}
-            <div className={docsIsDesktop ? "grid gap-4 lg:grid-cols-[360px_1fr]" : "hidden"}>
+            <div className="grid gap-4 lg:grid-cols-[360px_1fr] max-lg:hidden">
               <div className="rounded-2xl border bg-card/70 shadow-sm">
                 <div className="p-4 md:p-5 space-y-3">
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
