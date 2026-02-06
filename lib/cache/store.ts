@@ -48,7 +48,7 @@ function sweepMem(now = Date.now()) {
   }
 }
 
-export async function kvSet<T>(key: string, value: T, ttlSeconds = 60 * 60) {
+export async function kvSet<T>(key: string, value: T, ttlSeconds = 60 * 60 * 6) {
   if (!key) return;
 
   // TTL <= 0 means "expire immediately"

@@ -5,6 +5,7 @@ import { createHash } from "crypto";
 import { kvGet, kvSet } from "@/lib/cache/store";
 import {
   loadZip,
+  saveZip,
   ZipNotReadyError,
   ZipChunkMissingError,
   ZipCorruptError,
@@ -12,6 +13,7 @@ import {
 import { withRotatingKey } from "@/lib/genai/keyring";
 import { makeGenAI } from "@/lib/genai/rotating-client";
 import { MODELS } from "@/lib/genai/models";
+import { env } from "@/lib/env";
 import { ThinkingLevel } from "@google/genai";
 
 export const runtime = "nodejs";
@@ -110,6 +112,95 @@ function rankFiles(files: string[]) {
     .filter((p) => score(p) > -100);
 }
 
+
+function parseOwnerRepo(repoName: string): { owner: string; repo: string } | null {
+  const s = String(repoName || "").trim();
+  // Expected: owner/repo
+  if (!/^[^\s/]+\/[^\s/]+$/.test(s)) return null;
+  const [owner, repo] = s.split("/");
+  if (!owner || !repo) return null;
+  return { owner, repo };
+}
+
+async function getDefaultBranch(owner: string, repo: string): Promise<string | null> {
+  try {
+    const headers: Record<string, string> = {
+      Accept: "application/vnd.github+json",
+      "User-Agent": "cipher-ai",
+    };
+    if (env.GITHUB_TOKEN) headers["Authorization"] = `Bearer ${env.GITHUB_TOKEN}`;
+
+    const res = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { default_branch?: string };
+    return data.default_branch ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function downloadGitHubZip(owner: string, repo: string): Promise<Buffer> {
+  const def = await getDefaultBranch(owner, repo);
+
+  const candidates = [def, "main", "master", "canary", "develop", "dev", "trunk"].filter(Boolean) as string[];
+
+  const tried: { branch: string; status: number; url: string }[] = [];
+  const seen = new Set<string>();
+
+  for (const branch of candidates) {
+    if (seen.has(branch)) continue;
+    seen.add(branch);
+
+    // Prefer GitHub API zipball when we have a token (works for private repos + avoids codeload quirks).
+    const url = env.GITHUB_TOKEN
+      ? `https://api.github.com/repos/${owner}/${repo}/zipball/${branch}`
+      : `https://codeload.github.com/${owner}/${repo}/zip/refs/heads/${branch}`;
+
+    const headers: Record<string, string> = { "User-Agent": "cipher-ai" };
+    if (env.GITHUB_TOKEN) {
+      headers["Accept"] = "application/vnd.github+json";
+      headers["Authorization"] = `Bearer ${env.GITHUB_TOKEN}`;
+    }
+
+    const res = await fetch(url, { headers });
+    tried.push({ branch, status: res.status, url });
+
+    if (res.ok) {
+      const arr = await res.arrayBuffer();
+      return Buffer.from(arr);
+    }
+  }
+
+  throw new Error(
+    `Failed to download repo ZIP. Tried: ${tried.map((t) => `${t.branch}(${t.status})`).join(", ")}`
+  );
+}
+async function ensureZipBuffer(analysisId: string, meta: RepoMeta): Promise<Buffer> {
+  try {
+    return await loadZip(analysisId);
+  } catch (err: any) {
+    const code = err?.code;
+    const isZipMissing =
+      err instanceof ZipNotReadyError ||
+      err instanceof ZipChunkMissingError ||
+      err instanceof ZipCorruptError ||
+      code === "ENOENT";
+
+    if (!isZipMissing) throw err;
+
+    const parsed = parseOwnerRepo(meta.repoName);
+    if (!parsed) throw err;
+
+    // Fallback: re-download from GitHub and (best-effort) persist.
+    const zipBuf = await downloadGitHubZip(parsed.owner, parsed.repo);
+    try {
+      await saveZip(analysisId, zipBuf, TTL);
+    } catch {
+      // best-effort only
+    }
+    return zipBuf;
+  }
+}
 async function readFileFromZip(zip: JSZip, meta: RepoMeta, relPath: string) {
   const actualPath = meta.root ? `${meta.root}/${relPath}` : relPath;
 
@@ -191,6 +282,19 @@ async function generateDocWithGemini(meta: RepoMeta, path: string, content: stri
 function zipErrorResponse(err: unknown, analysisId: string) {
   const code = (err as any)?.code;
 
+  if (code === "ENOENT") {
+    return NextResponse.json(
+      {
+        code: "ZIP_NOT_READY",
+        error:
+          "Repository ZIP is not available on the server (ENOENT). This analysis likely expired or was created before ZIP persistence. Please re-run the analysis.",
+        detail: err instanceof Error ? err.message : String(err),
+        analysisId,
+      },
+      { status: 410 }
+    );
+  }
+
   if (err instanceof ZipNotReadyError || err instanceof ZipChunkMissingError) {
     return NextResponse.json(
       {
@@ -233,7 +337,7 @@ export async function POST(req: Request) {
 
     let zipBuf: Buffer;
     try {
-      zipBuf = await loadZip(analysisId);
+      zipBuf = await ensureZipBuffer(analysisId, meta);
     } catch (e) {
       const resp = zipErrorResponse(e, analysisId);
       if (resp) return resp;

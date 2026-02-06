@@ -812,7 +812,7 @@ const patchedCountAny = useMemo(
 
       // si llegó aquí, falló por 429 múltiples veces
       if (lastRes) {
-        const msg = lastData ? friendlyError(lastRes, lastData) : "Rate limit de Gemini. Intenta en 30–60s.";
+        const msg = lastData ? friendlyError(lastRes, lastData) : "Rate limit of Gemini. Try again in 30–60s.";
         setDocsErr(msg);
       } else {
         setDocsErr("Docs index failed.");
