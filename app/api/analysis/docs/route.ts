@@ -1,10 +1,14 @@
-//src/app/api/analysis/docs/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import JSZip from "jszip";
 import { createHash } from "crypto";
 import { kvGet, kvSet } from "@/lib/cache/store";
-import { loadZip } from "@/lib/repo/zip-store";
+import {
+  loadZip,
+  ZipNotReadyError,
+  ZipChunkMissingError,
+  ZipCorruptError,
+} from "@/lib/repo/zip-store";
 import { withRotatingKey } from "@/lib/genai/keyring";
 import { makeGenAI } from "@/lib/genai/rotating-client";
 import { MODELS } from "@/lib/genai/models";
@@ -58,7 +62,11 @@ function truncate(s: string, max: number) {
 
 function safeJsonParse(raw: string) {
   const t = String(raw || "").trim();
-  const cleaned = t.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
+  const cleaned = t
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
   try {
     return JSON.parse(cleaned);
   } catch {
@@ -80,10 +88,10 @@ function rankFiles(files: string[]) {
     if (x === "package.json") s += 100;
     if (x.endsWith("/package.json")) s += 80;
 
-    if (x.includes("/src/app/api/")) s += 90;
-    if (x.includes("/src/app/") && x.endsWith(".tsx")) s += 70;
-    if (x.includes("/src/lib/")) s += 60;
-    if (x.includes("/src/types/")) s += 55;
+    if (x.includes("/app/api/")) s += 90;
+    if (x.includes("/app/") && x.endsWith(".tsx")) s += 70;
+    if (x.includes("/lib/")) s += 60;
+    if (x.includes("/types/")) s += 55;
 
     if (x.endsWith("route.ts")) s += 65;
     if (x.endsWith(".ts") || x.endsWith(".tsx")) s += 40;
@@ -148,8 +156,6 @@ async function generateDocWithGemini(meta: RepoMeta, path: string, content: stri
     content,
   ].join("\n");
 
-  // ✅ FIX: contents tipado correcto + config correcto (NO generationConfig)
-// ✅ Rotation: if a key is rate-limited/quota-exhausted, automatically retry with the next key.
   const resp = await withRotatingKey(async (apiKey) => {
     const genai = makeGenAI(apiKey);
 
@@ -162,7 +168,9 @@ async function generateDocWithGemini(meta: RepoMeta, path: string, content: stri
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       },
     });
-  });const parsed = safeJsonParse(resp.text ?? "");
+  });
+
+  const parsed = safeJsonParse(resp.text ?? "");
 
   return {
     path,
@@ -180,6 +188,38 @@ async function generateDocWithGemini(meta: RepoMeta, path: string, content: stri
   };
 }
 
+function zipErrorResponse(err: unknown, analysisId: string) {
+  const code = (err as any)?.code;
+
+  if (err instanceof ZipNotReadyError || err instanceof ZipChunkMissingError) {
+    return NextResponse.json(
+      {
+        code: code ?? "ZIP_NOT_READY",
+        error:
+          "Repository ZIP is not available on the server. This analysis likely expired or was created before ZIP persistence. Please re-run the analysis.",
+        detail: err instanceof Error ? err.message : String(err),
+        analysisId,
+      },
+      { status: 410 }
+    );
+  }
+
+  if (err instanceof ZipCorruptError) {
+    return NextResponse.json(
+      {
+        code: code ?? "ZIP_CORRUPT",
+        error:
+          "Repository ZIP appears corrupted/incomplete on the server. Please re-run the analysis.",
+        detail: err instanceof Error ? err.message : String(err),
+        analysisId,
+      },
+      { status: 500 }
+    );
+  }
+
+  return null;
+}
+
 export async function POST(req: Request) {
   try {
     const body = BodySchema.parse(await req.json());
@@ -191,10 +231,29 @@ export async function POST(req: Request) {
     const meta = await kvGet<RepoMeta>(`repo:${analysisId}`);
     if (!meta) return NextResponse.json({ error: "Repo not found" }, { status: 404 });
 
-    const zipBuf = await loadZip(analysisId);
-    if (!zipBuf) return NextResponse.json({ error: "Missing ZIP for analysisId" }, { status: 404 });
+    let zipBuf: Buffer;
+    try {
+      zipBuf = await loadZip(analysisId);
+    } catch (e) {
+      const resp = zipErrorResponse(e, analysisId);
+      if (resp) return resp;
+      throw e;
+    }
 
-    const zip = await JSZip.loadAsync(zipBuf as any);
+    let zip: JSZip;
+    try {
+      zip = await JSZip.loadAsync(zipBuf as any);
+    } catch (e) {
+      return NextResponse.json(
+        {
+          code: "ZIP_PARSE_FAILED",
+          error: "Failed to parse repository ZIP on the server. Please re-run analysis.",
+          detail: e instanceof Error ? e.message : String(e),
+          analysisId,
+        },
+        { status: 500 }
+      );
+    }
 
     if (mode === "index") {
       const cacheKey = `docs:index:${analysisId}:${maxFiles}`;
@@ -239,6 +298,7 @@ export async function POST(req: Request) {
   } catch (err: any) {
     const msg = String(err?.message ?? "Docs failed");
     const lower = msg.toLowerCase();
+
     const isQuota =
       lower.includes("resource_exhausted") ||
       lower.includes("429") ||

@@ -71,9 +71,16 @@ function friendlyError(res: Response, data: any) {
   const retryAfter = Number(res.headers.get("retry-after") || "");
   const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? `${retryAfter}s` : "30–60s";
 
+  const code = String(data?.code ?? data?.errorCode ?? "");
+
   if (isRateLimit(res, data)) {
     return `Rate limit Gemini. Try again in ${wait}.`;
   }
+
+  if (res.status === 410 || code.startsWith("ZIP_")) {
+    return "This analysis ZIP is missing/expired on the server. Re-run the analysis to regenerate it.";
+  }
+
   return String(data?.error ?? `Request failed (${res.status})`);
 }
 
@@ -207,6 +214,33 @@ export default function AnalysisPage() {
   const [docSelected, setDocSelected] = useState<string>("");
   const [doc, setDoc] = useState<FileDoc | null>(null);
   const [docsErr, setDocsErr] = useState<string>("");
+  const [docsMobileView, setDocsMobileView] = useState<"list" | "detail">("list");
+
+  const [docsIsDesktop, setDocsIsDesktop] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const update = () => setDocsIsDesktop(mq.matches);
+    update();
+    // @ts-ignore
+    if (mq.addEventListener) mq.addEventListener("change", update);
+    // @ts-ignore
+    else mq.addListener(update);
+
+    return () => {
+      // @ts-ignore
+      if (mq.removeEventListener) mq.removeEventListener("change", update);
+      // @ts-ignore
+      else mq.removeListener(update);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (tab !== "docs") return;
+    if (!docsIsDesktop) setDocsMobileView("list");
+  }, [tab, docsIsDesktop]);
+
 
   // Patch preview modal (in-page)
   const [patchBusyId, setPatchBusyId] = useState<string>("");
@@ -790,6 +824,8 @@ const patchedCountAny = useMemo(
 
   async function openDoc(path: string) {
     setDocSelected(path);
+    // Mobile: switch to detail view so the doc content doesn’t render below the list.
+    if (!docsIsDesktop) setDocsMobileView("detail");
     setDoc(null);
     setDocsErr("");
     setDocsBusy(true);
@@ -1239,7 +1275,7 @@ const patchedCountAny = useMemo(
       >
         <div className="mx-auto w-full max-w-[1300px] px-4 md:px-6 py-8">
           <div className="rounded-2xl border bg-card/70 p-5">
-            <div className="text-sm text-muted-foreground">Loading…</div>
+            <div className="text-sm text-muted-foreground break-words">Loading…</div>
             <div className="mt-3">
               <Progress value={35} />
             </div>
@@ -1465,7 +1501,7 @@ const patchedCountAny = useMemo(
                 <div className="flex items-center justify-between gap-2">
                   <div className="min-w-0">
                     <div className="text-sm font-semibold">Files</div>
-                    <div className="text-xs text-muted-foreground truncate">
+                    <div className="text-xs text-muted-foreground truncate min-w-0">
                       Repo: <span className="font-medium text-foreground">{repo?.repoName ?? "Loading…"}</span>
                     </div>
                   </div>
@@ -1854,7 +1890,7 @@ const patchedCountAny = useMemo(
                                   {g.findings.slice(0, 40).map((d) => (
                                     <div key={d.id} className="px-4 py-2 grid grid-cols-[170px_1fr_130px] gap-2 border-b">
                                       <div className="text-xs font-semibold truncate">{d.vulnId}</div>
-                                      <div className="text-xs text-muted-foreground">{d.summary}</div>
+                                      <div className="text-xs text-muted-foreground break-words">{d.summary}</div>
                                       <div className="text-xs">{d.fixedVersion ?? "—"}</div>
                                     </div>
                                   ))}
@@ -2253,98 +2289,227 @@ ${d.suggestion}`,
         )}
 
         {tab === "docs" && (
-          <section className="grid gap-4 md:grid-cols-[360px_1fr]">
-            <div className="rounded-2xl border bg-card/70 shadow-sm">
-              <div className="p-4 md:p-5 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <div className="text-sm font-semibold">Docs</div>
-                    <div className="text-xs text-muted-foreground">Auto-generated per file (cached)</div>
-                  </div>
+          <section className="space-y-4">
+            {/* Mobile: master/detail so the doc content doesn't render below the list */}
+            <div className={docsIsDesktop ? "hidden" : ""}>
+              {docsMobileView === "list" ? (
+                <div className="rounded-2xl border bg-card/70 shadow-sm">
+                  <div className="p-4 md:p-5 space-y-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                      <div>
+                        <div className="text-sm font-semibold">Docs</div>
+                        <div className="text-xs text-muted-foreground">Auto-generated per file (cached)</div>
+                      </div>
 
-                  <Button variant="secondary" onClick={generateDocsIndex} disabled={docsIndexBusy} className="h-9">
-                    {docsIndexBusy ? "Generating…" : "Generate index"}
-                  </Button>
-                </div>
-
-                <Input placeholder="Search docs…" value={docsQ} onChange={(e) => setDocsQ(e.target.value)} />
-
-                <div className="h-[38vh] md:h-[520px] overflow-auto rounded-xl border bg-background/50">
-                  {docsIndexFiltered.length === 0 ? (
-                    <div className="p-3 text-sm text-muted-foreground">
-                      {docsIndex.length === 0 ? "No docs index yet. Click “Generate index”." : "No matches."}
-                    </div>
-                  ) : (
-                    docsIndexFiltered.map((it) => (
-                      <button
-                        key={it.path}
-                        onClick={() => openDoc(it.path)}
-                        className={[
-                          "w-full text-left text-sm px-3 py-2 border-b hover:bg-muted/30",
-                          docSelected === it.path ? "bg-muted/40" : "",
-                        ].join(" ")}
+                      <Button
+                        variant="secondary"
+                        onClick={generateDocsIndex}
+                        disabled={docsIndexBusy}
+                        className="h-9 w-full sm:w-auto"
                       >
-                        <div className="font-semibold truncate">{it.title || it.path}</div>
-                        <div className="text-xs text-muted-foreground truncate">{it.path}</div>
-                        <div className="text-xs text-muted-foreground truncate">{it.purpose}</div>
-                      </button>
-                    ))
-                  )}
+                        {docsIndexBusy ? "Generating…" : "Generate index"}
+                      </Button>
+                    </div>
+
+                    <Input placeholder="Search docs…" value={docsQ} onChange={(e) => setDocsQ(e.target.value)} />
+
+                    <div className="max-h-[62vh] overflow-auto rounded-xl border bg-background/50">
+                      {docsIndexFiltered.length === 0 ? (
+                        <div className="p-3 text-sm text-muted-foreground">
+                          {docsIndex.length === 0 ? "No docs index yet. Click “Generate index”." : "No matches."}
+                        </div>
+                      ) : (
+                        docsIndexFiltered.map((it) => (
+                          <button
+                            key={it.path}
+                            onClick={() => openDoc(it.path)}
+                            className={[
+                              "w-full text-left text-sm px-3 py-2 border-b hover:bg-muted/30",
+                              docSelected === it.path ? "bg-muted/40" : "",
+                            ].join(" ")}
+                          >
+                            <div className="font-semibold truncate">{it.title || it.path}</div>
+                            <div className="text-xs text-muted-foreground truncate">{it.path}</div>
+                            <div className="text-xs text-muted-foreground truncate">{it.purpose}</div>
+                          </button>
+                        ))
+                      )}
+                    </div>
+
+                    {/* Quick preview row on mobile */}
+                    {docSelected ? (
+                      <div className="flex items-center justify-between gap-2 pt-1">
+                        <div className="text-xs text-muted-foreground truncate min-w-0">{docSelected}</div>
+                        <Button
+                          size="sm"
+                          className="h-8 shrink-0"
+                          variant="secondary"
+                          onClick={() => setDocsMobileView("detail")}
+                        >
+                          View
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="rounded-2xl border bg-card/70 shadow-sm">
+                  <div className="p-4 md:p-5 space-y-3">
+                    <div className="flex items-center justify-between gap-2 min-w-0">
+                      <Button variant="secondary" className="h-9 shrink-0" onClick={() => setDocsMobileView("list")}>
+                        Back
+                      </Button>
+
+                      <Button
+                        variant="secondary"
+                        className="h-9 shrink-0"
+                        disabled={!docSelected}
+                        onClick={() => {
+                          if (!docSelected) return;
+                          jumpToLocation(docSelected, 1, 1, "Opened file ✅");
+                        }}
+                      >
+                        Open file
+                      </Button>
+                    </div>
+
+                    <div className="text-xs text-muted-foreground break-all">
+                      {docSelected ? docSelected : "Select a doc item"}
+                    </div>
+
+                    {docsErr ? (
+                      <pre className="whitespace-pre-wrap break-words text-sm p-4 rounded-2xl border border-red-500/40 bg-red-500/5 overflow-auto max-w-full">
+                        {docsErr}
+                      </pre>
+                    ) : null}
+
+                    {docsBusy ? <div className="text-sm text-muted-foreground">Generating docs…</div> : null}
+
+                    {!docsBusy && doc ? (
+                      <div className="rounded-2xl border bg-background/50 p-4 space-y-3 min-w-0 max-h-[62vh] overflow-auto">
+                        <div>
+                          <div className="text-lg font-semibold break-words">{doc.title}</div>
+                          <div className="text-xs text-muted-foreground">{doc.updatedAt}</div>
+                        </div>
+
+                        <div className="text-sm">
+                          <span className="font-semibold">Purpose: </span>
+                          <span className="text-muted-foreground break-words">{doc.purpose}</span>
+                        </div>
+
+                        <DocList label="Inputs" items={doc.inputs} />
+                        <DocList label="Outputs" items={doc.outputs} />
+                        <DocList label="Side effects" items={doc.sideEffects} />
+                        <DocList label="Uses" items={doc.uses} />
+                        <DocList label="Used by" items={doc.usedBy} />
+                        <DocList label="Risks" items={doc.risks} />
+                        <DocList label="Examples" items={doc.examples} />
+                        <DocList label="Notes" items={doc.notes} />
+                      </div>
+                    ) : null}
+
+                    {!docsBusy && !doc && !docsErr ? (
+                      <div className="text-sm text-muted-foreground">Pick an item from the index.</div>
+                    ) : null}
+                  </div>
+                </div>
+              )}
             </div>
 
-            <div className="rounded-2xl border bg-card/70 shadow-sm">
-              <div className="p-4 md:p-5 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-xs text-muted-foreground truncate">{docSelected ? docSelected : "Select a doc item"}</div>
-                  <Button
-                    variant="secondary"
-                    className="h-9"
-                    disabled={!docSelected}
-                    onClick={() => {
-                      if (!docSelected) return;
-                      jumpToLocation(docSelected, 1, 1, "Opened file ✅");
-                    }}
-                  >
-                    Open file
-                  </Button>
-                </div>
-
-                {docsErr ? (
-                  <pre className="whitespace-pre-wrap text-sm p-4 rounded-2xl border border-red-500/40 bg-red-500/5">
-                    {docsErr}
-                  </pre>
-                ) : null}
-
-                {docsBusy ? <div className="text-sm text-muted-foreground">Generating docs…</div> : null}
-
-                {!docsBusy && doc ? (
-                  <div className="rounded-2xl border bg-background/50 p-4 space-y-3">
+            {/* Desktop: split view */}
+            <div className={docsIsDesktop ? "grid gap-4 lg:grid-cols-[360px_1fr]" : "hidden"}>
+              <div className="rounded-2xl border bg-card/70 shadow-sm">
+                <div className="p-4 md:p-5 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                     <div>
-                      <div className="text-lg font-semibold">{doc.title}</div>
-                      <div className="text-xs text-muted-foreground">{doc.updatedAt}</div>
+                      <div className="text-sm font-semibold">Docs</div>
+                      <div className="text-xs text-muted-foreground">Auto-generated per file (cached)</div>
                     </div>
 
-                    <div className="text-sm">
-                      <span className="font-semibold">Purpose: </span>
-                      <span className="text-muted-foreground">{doc.purpose}</span>
-                    </div>
-
-                    <DocList label="Inputs" items={doc.inputs} />
-                    <DocList label="Outputs" items={doc.outputs} />
-                    <DocList label="Side effects" items={doc.sideEffects} />
-                    <DocList label="Uses" items={doc.uses} />
-                    <DocList label="Used by" items={doc.usedBy} />
-                    <DocList label="Risks" items={doc.risks} />
-                    <DocList label="Examples" items={doc.examples} />
-                    <DocList label="Notes" items={doc.notes} />
+                    <Button variant="secondary" onClick={generateDocsIndex} disabled={docsIndexBusy} className="h-9 w-full sm:w-auto">
+                      {docsIndexBusy ? "Generating…" : "Generate index"}
+                    </Button>
                   </div>
-                ) : null}
 
-                {!docsBusy && !doc && !docsErr ? (
-                  <div className="text-sm text-muted-foreground">Pick an item from the index.</div>
-                ) : null}
+                  <Input placeholder="Search docs…" value={docsQ} onChange={(e) => setDocsQ(e.target.value)} />
+
+                  <div className="h-[38vh] md:h-[520px] overflow-auto rounded-xl border bg-background/50">
+                    {docsIndexFiltered.length === 0 ? (
+                      <div className="p-3 text-sm text-muted-foreground">
+                        {docsIndex.length === 0 ? "No docs index yet. Click “Generate index”." : "No matches."}
+                      </div>
+                    ) : (
+                      docsIndexFiltered.map((it) => (
+                        <button
+                          key={it.path}
+                          onClick={() => openDoc(it.path)}
+                          className={[
+                            "w-full text-left text-sm px-3 py-2 border-b hover:bg-muted/30",
+                            docSelected === it.path ? "bg-muted/40" : "",
+                          ].join(" ")}
+                        >
+                          <div className="font-semibold truncate">{it.title || it.path}</div>
+                          <div className="text-xs text-muted-foreground truncate">{it.path}</div>
+                          <div className="text-xs text-muted-foreground truncate">{it.purpose}</div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border bg-card/70 shadow-sm">
+                <div className="p-4 md:p-5 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 min-w-0">
+                    <div className="text-xs text-muted-foreground truncate min-w-0">{docSelected ? docSelected : "Select a doc item"}</div>
+                    <Button
+                      variant="secondary"
+                      className="h-9 w-full sm:w-auto"
+                      disabled={!docSelected}
+                      onClick={() => {
+                        if (!docSelected) return;
+                        jumpToLocation(docSelected, 1, 1, "Opened file ✅");
+                      }}
+                    >
+                      Open file
+                    </Button>
+                  </div>
+
+                  {docsErr ? (
+                    <pre className="whitespace-pre-wrap break-words text-sm p-4 rounded-2xl border border-red-500/40 bg-red-500/5 overflow-auto max-w-full">
+                      {docsErr}
+                    </pre>
+                  ) : null}
+
+                  {docsBusy ? <div className="text-sm text-muted-foreground">Generating docs…</div> : null}
+
+                  {!docsBusy && doc ? (
+                    <div className="rounded-2xl border bg-background/50 p-4 space-y-3 min-w-0">
+                      <div>
+                        <div className="text-lg font-semibold">{doc.title}</div>
+                        <div className="text-xs text-muted-foreground">{doc.updatedAt}</div>
+                      </div>
+
+                      <div className="text-sm">
+                        <span className="font-semibold">Purpose: </span>
+                        <span className="text-muted-foreground break-words">{doc.purpose}</span>
+                      </div>
+
+                      <DocList label="Inputs" items={doc.inputs} />
+                      <DocList label="Outputs" items={doc.outputs} />
+                      <DocList label="Side effects" items={doc.sideEffects} />
+                      <DocList label="Uses" items={doc.uses} />
+                      <DocList label="Used by" items={doc.usedBy} />
+                      <DocList label="Risks" items={doc.risks} />
+                      <DocList label="Examples" items={doc.examples} />
+                      <DocList label="Notes" items={doc.notes} />
+                    </div>
+                  ) : null}
+
+                  {!docsBusy && !doc && !docsErr ? (
+                    <div className="text-sm text-muted-foreground">Pick an item from the index.</div>
+                  ) : null}
+                </div>
               </div>
             </div>
           </section>
@@ -2516,9 +2681,9 @@ function DocList({ label, items }: { label: string; items?: string[] }) {
   return (
     <div className="space-y-1">
       <div className="text-sm font-semibold">{label}</div>
-      <ul className="list-disc pl-5 text-sm text-muted-foreground space-y-1">
+      <ul className="list-disc pl-5 text-sm text-muted-foreground space-y-1 break-words">
         {items.slice(0, 12).map((x, i) => (
-          <li key={i}>{x}</li>
+          <li key={i} className="break-words">{x}</li>
         ))}
       </ul>
     </div>

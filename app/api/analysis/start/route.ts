@@ -14,7 +14,7 @@ import { makeGenAI } from "@/lib/genai/rotating-client";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// ✅ TTL alineado para: analysis status + repo meta + zip/manifest
+// Keep analysis artifacts aligned (repo meta + zip + status)
 const TTL_SECONDS = 60 * 60 * 6; // 6h
 
 /** JSON payload for GitHub URL analysis */
@@ -97,11 +97,13 @@ function pickKeyFiles(allPaths: string[]) {
   const lowerMap = new Map(allPaths.map((p) => [p.toLowerCase(), p]));
   const chosen: string[] = [];
 
+  // exact name matches
   for (const p of priority) {
     const found = lowerMap.get(p);
     if (found) chosen.push(found);
   }
 
+  // entrypoint hints
   const entryHints = allPaths.filter((p) => {
     const pl = p.toLowerCase();
     return (
@@ -177,6 +179,11 @@ async function getDefaultBranch(owner: string, repo: string): Promise<string | n
   }
 }
 
+/**
+ * Download a repository ZIP from GitHub via codeload. We try:
+ * 1) default branch (from GitHub API)
+ * 2) common fallbacks
+ */
 async function downloadGitHubZip(owner: string, repo: string): Promise<Buffer> {
   const def = await getDefaultBranch(owner, repo);
 
@@ -230,7 +237,7 @@ function buildNormalizedPathMap(paths: string[]) {
 }
 
 async function analyzeZipBuffer(id: string, baseStatus: AnalysisStatus, zipBuf: Buffer, repoName: string) {
-  // ✅ Persist ZIP for later file view & explain endpoints (Upstash chunked, if you replaced zip-store)
+  // Persist ZIP for later file view & explain endpoints (Upstash if available)
   await saveZip(id, zipBuf, TTL_SECONDS);
 
   const zip = await JSZip.loadAsync(zipBuf);
@@ -241,7 +248,7 @@ async function analyzeZipBuffer(id: string, baseStatus: AnalysisStatus, zipBuf: 
   const textPaths = normalizedPaths.filter(isProbablyText);
   const keyFiles = pickKeyFiles(textPaths);
 
-  // ✅ Save metadata for file explorer (same TTL)
+  // Save metadata for file explorer
   await kvSet(
     `repo:${id}`,
     {
@@ -252,6 +259,7 @@ async function analyzeZipBuffer(id: string, baseStatus: AnalysisStatus, zipBuf: 
     TTL_SECONDS
   );
 
+  // Token saving: small tree preview + small snippets
   const treePreview = textPaths.slice(0, 80).join("\n");
 
   const keyFileSnippets: { path: string; content: string }[] = [];
@@ -335,7 +343,6 @@ async function analyzeZipBuffer(id: string, baseStatus: AnalysisStatus, zipBuf: 
 
   const parsed = ResultSchema.parse(JSON.parse(jsonText)) as AnalysisResult;
 
-  // Keep your existing “model used” hint without adding new fields to the type
   parsed.summary = [`(Model used: ${usedModel})`, ...parsed.summary].slice(0, 10);
 
   const done: AnalysisStatus = {
@@ -410,12 +417,10 @@ export async function POST(req: Request) {
     // A) ZIP upload (multipart/form-data)
     if (contentType.includes("multipart/form-data")) {
       const form = await req.formData();
-
-      // ✅ Back-compat: acepta "zip" (tu original) o "file" (otros flows)
-      const zipFile = (form.get("zip") ?? form.get("file")) as unknown;
+      const zipFile = form.get("zip");
 
       if (!(zipFile instanceof File)) {
-        throw new Error("Missing ZIP file field in form-data (expected 'zip' or 'file').");
+        throw new Error("Missing 'zip' file field in form-data.");
       }
 
       const MAX_BYTES = 25 * 1024 * 1024;
@@ -442,7 +447,7 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json(
-      { analysisId: id, error: "Send either JSON {githubUrl} or multipart/form-data with 'zip' (or 'file')." },
+      { analysisId: id, error: "Send either JSON {githubUrl} or multipart/form-data with 'zip'." },
       { status: 400 }
     );
   } catch (err) {
